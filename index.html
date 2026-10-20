@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OffsetAxis: UDF Mesh Reconstruction via Offset-Volume Medial Axis Extraction</title>
+  <meta name="description" content="OffsetAxis (SIGGRAPH Asia 2026) extracts structurally coherent meshes from unsigned distance fields — open, non-manifold, with surfaces and curves — by extracting the medial axis of the UDF's offset volume.">
+  <meta property="og:title" content="OffsetAxis · SIGGRAPH Asia 2026">
+  <meta property="og:description" content="UDF Mesh Reconstruction via Offset-Volume Medial Axis Extraction">
+  <meta property="og:image" content="https://huang46u.github.io/OffsetAxis-Page/img/teaser.webp">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono&family=Inter+Tight:wght@500;600;750&family=Inter:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+  <header class="hero">
+    <canvas id="iso" aria-hidden="true"></canvas>
+    <div class="wrap hero-in">
+      <div class="venue">SIGGRAPH Asia 2026</div>
+      <h1>Offset<span class="acc">Axis</span></h1>
+      <p class="subtitle">UDF Mesh Reconstruction via Offset-Volume Medial Axis Extraction</p>
+      <p class="authors">
+        <a href="#">Qijia Huang</a> <span class="sep">·</span> <a href="#">Pierre Kraemer</a> <span class="sep">·</span> <a href="#">Dominique Bechmann</a>
+      </p>
+      <p class="aff">ICube, Université de Strasbourg, CNRS, France</p>
+      <!-- Links: set the arXiv URL; turn Code / Poster into <a class="btn" href="..."> when they are out. -->
+      <nav class="btns" aria-label="Paper resources">
+        <a class="btn" href="#" data-todo="arxiv">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/></svg>Paper <small>arXiv</small>
+        </a>
+        <a class="btn" href="https://offsetaxis.pages.dev" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>Slides
+        </a>
+        <span class="btn off" aria-disabled="true">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/></svg>Code <small>coming soon</small>
+        </span>
+        <span class="btn off" aria-disabled="true">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="2" width="14" height="20" rx="1"/><path d="M9 7h6M9 11h6M9 15h4"/></svg>Poster <small>coming soon</small>
+        </span>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <figure class="teaser">
+      <img src="/img/teaser.webp" width="2400" height="1042" alt="Meshes reconstructed by OffsetAxis from a point cloud, a learned Q-MDF of an ant, a neural UDF of a garment and a triangle soup of two touching spheres">
+      <figcaption>From a point cloud, a learned Q-MDF, a neural UDF or a triangle soup, OffsetAxis extracts open or closed, manifold or non-manifold meshes that may mix surfaces and curves.</figcaption>
+    </figure>
+
+    <section id="abstract">
+      <h2>Abstract</h2>
+      <p class="abstract">
+        Unsigned distance fields (UDFs) offer broader modeling capabilities than signed distance fields (SDFs), enabling the representation of shapes with open boundaries, non-manifold structures or mixed curve and surface parts. However, extracting coherent meshes from UDFs is fundamentally harder, as classical grid-based iso-surfacing techniques are not applicable since they require a way to distinguish the inside from the outside of the shape. We introduce OffsetAxis, a new UDF reconstruction pipeline that supports open, non-manifold, and curve-like geometries. Our key insight is that the 0-level set extraction problem can be restated as <mark>the extraction of the medial axis of the α-offset volume of the UDF</mark>. This formulation unlocks mature medial-axis machinery that naturally supports boundaries, non-manifold junctions and curves. To avoid the biases of grid-based techniques, we sample the α-offset surface using ray casting and optimize medial balls inside the offset volume with an efficient variant of Variational Medial Axis Sampling. The final mesh is recovered by taking the dual of the connectivity of the medial ball clusters, producing structurally coherent reconstructions for a wide range of topologies. The robustness and versatility of the approach allow it to handle imperfect distance fields, including neural UDFs trained on noisy inputs, the Quasi-Medial Distance Field (Q-MDF), as well as distances computed directly on triangle soups or point clouds. Extensive experiments demonstrate that our method produces more faithful mesh reconstruction and better alignment with the underlying shape structure than prior techniques.
+      </p>
+    </section>
+
+    <section id="method">
+      <h2>Method</h2>
+      <p class="kicker">Six steps, from a distance field to a mesh, on the Stanford bunny. Click a step; drag the 3D view to orbit, scroll to zoom.</p>
+      <div class="steps" role="tablist" aria-label="Pipeline steps">
+        <button type="button" role="tab" class="step" data-i="0"><span>1</span>Input UDF</button>
+        <button type="button" role="tab" class="step" data-i="1"><span>2</span>Offset volume</button>
+        <button type="button" role="tab" class="step" data-i="2"><span>3</span>Sampling</button>
+        <button type="button" role="tab" class="step" data-i="3"><span>4</span>Initialization</button>
+        <button type="button" role="tab" class="step" data-i="4"><span>5</span>Optimization</button>
+        <button type="button" role="tab" class="step" data-i="5"><span>6</span>Connectivity</button>
+      </div>
+
+      <div class="viewer">
+        <div class="stage">
+          <div class="stage-host" id="stage"></div>
+          <div class="stage-msg" id="stage-msg">Loading the 3D replay…</div>
+          <div class="stage-iter" id="stage-iter" hidden></div>
+          <div class="stage-bar">
+            <button type="button" class="ctl" id="play" aria-label="Pause">❚❚</button>
+            <button type="button" class="ctl" id="replay" aria-label="Replay this step">↺</button>
+            <div class="progress"><i id="progress"></i></div>
+            <button type="button" class="ctl next" id="next">Next step →</button>
+          </div>
+        </div>
+
+        <div class="side">
+          <article data-step="0">
+            <h3><i>1</i>Input: an unsigned distance field</h3>
+            <p>We follow the UDF of the Stanford bunny through the pipeline. The slice shows the distance to the surface with iso-lines.</p>
+            <p>As the slice sweeps through the shape, the field <b>never changes sign</b>: there is nothing for Marching Cubes to work with.</p>
+            <div class="legend"><span>0</span><i></i><span>far</span></div>
+          </article>
+          <article data-step="1" hidden>
+            <h3><i>2</i>Key idea: the offset volume</h3>
+            <svg class="ysvg" viewBox="-150 -125 300 245" role="img" aria-label="A non-manifold Y-shaped input, its alpha-offset volume and the medial axis of that volume">
+              <path d="M0 0 L0 -95 M0 0 L-82 47 M0 0 L82 47" fill="none" stroke="#4BA3DE" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M0 0 L0 -95 M0 0 L-82 47 M0 0 L82 47" fill="none" stroke="#ECECEF" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+              <line x1="62" y1="36" x2="69" y2="24" stroke="#555" stroke-width="1.5"/>
+              <text x="72" y="22" font-size="17" font-style="italic" font-family="Georgia, serif" fill="#555">α</text>
+              <path d="M0 0 L0 -95 M0 0 L-82 47 M0 0 L82 47" fill="none" stroke="#17191e" stroke-width="2.5" stroke-linecap="round"/>
+            </svg>
+            <p>A non-manifold input has no inside. But its <b>α-offset volume</b> {UDF ≤ α} is always a closed, manifold solid (the cyan line on the slice).</p>
+            <p>Its <b>medial axis</b> recovers the input, with boundaries, junctions and curves. We never build the offset surface: we only sample it.</p>
+          </article>
+          <article data-step="2" hidden>
+            <h3><i>3</i>Sampling, without a grid</h3>
+            <canvas class="frames" data-frames="sampling2d" width="512" height="512" role="img" aria-label="2D illustration: rays find the offset surface, then Poisson disk sampling spreads over it"></canvas>
+            <p>Rays stop where UDF = α and leave seeds on both sides of the shape <span class="cite">[Ling et al. 2025]</span>. Poisson disk sampling then spreads from the seeds over the whole level set: <b>no mesh, no voxel grid</b>.</p>
+          </article>
+          <article data-step="3" hidden>
+            <h3><i>4</i>Initial medial spheres</h3>
+            <div class="pair">
+              <img src="/img/method/medial_spheres_init_top.webp" alt="One candidate medial sphere per offset-surface sample">
+              <img src="/img/method/medial_spheres_init_bottom.webp" alt="The largest sphere covers the samples in its dilated support">
+            </div>
+            <p>Each sample gets its maximal ball inside the offset volume <span class="cite">[Ma et al. 2012]</span>. A greedy cover keeps the largest sphere, drops the samples it covers and repeats <span class="cite">[Dou et al. 2022]</span>.</p>
+          </article>
+          <article data-step="4" hidden>
+            <h3><i>5</i>Variational optimization</h3>
+            <canvas class="frames" data-frames="optimization2d" width="512" height="512" role="img" aria-label="2D illustration: medial spheres converge inside the offset volume"></canvas>
+            <p class="formula">
+              <math display="block"><msub><mi>E</mi><mi>i</mi></msub><mo>=</mo><munder><mo>∑</mo><mrow><msub><mi>v</mi><mi>j</mi></msub><mo>∈</mo><msub><mi>𝒞</mi><mi>i</mi></msub></mrow></munder><mo>(</mo><msub><mi>Q</mi><msub><mi>v</mi><mi>j</mi></msub></msub><mo>(</mo><msub><mi mathvariant="bold">c</mi><mi>i</mi></msub><mo>,</mo><msub><mi>r</mi><mi>i</mi></msub><mo>)</mo><mo>+</mo><mi>μ</mi><msub><mi>L</mi><msub><mi>v</mi><mi>j</mi></msub></msub><mo>(</mo><msub><mi mathvariant="bold">c</mi><mi>i</mi></msub><mo>)</mo><mo>)</mo></math>
+            </p>
+            <p>We alternate two steps: assign each sample to its best sphere, then update each sphere. The SQEM <i>Q</i> <span class="cite">[Thiery et al. 2013]</span> plus a line quadric <i>L</i> <span class="cite">[Liu et al. 2025]</span> keep the update quadratic: <b>one linear solve</b> per sphere.</p>
+          </article>
+          <article data-step="5" hidden>
+            <h3><i>6</i>The mesh is the dual of the clusters</h3>
+            <p>Sphere centres become vertices; two spheres are linked when neighbouring samples belong to them. Triangles are 3-cliques; the few tetrahedra left (orange) are removed by thinning <span class="cite">[Wang et al. 2025]</span>.</p>
+            <p>The output has only <b>triangles and segments</b>: no tetrahedra.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="results">
+      <h2>Results</h2>
+      <p class="kicker">Drag the divider to compare with prior UDF meshing methods; pick another method below.</p>
+      <div class="datasets" role="tablist" aria-label="Datasets" id="datasets"></div>
+      <div class="compare">
+        <figure class="gt-box">
+          <img id="gt-img" alt="Ground truth">
+          <span class="tag gt" id="tag-gt"></span>
+        </figure>
+        <div class="swipe" id="swipe" tabindex="0" role="slider" aria-label="Comparison divider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50">
+          <img id="swipe-base" alt="">
+          <img id="swipe-ours" class="ours" alt="">
+          <div class="divider"></div>
+          <span class="tag left" id="tag-base"></span>
+          <span class="tag right" id="tag-ours"></span>
+        </div>
+      </div>
+      <div class="thumbs" id="thumbs"></div>
+      <p class="note" id="dataset-note"></p>
+
+      <figure class="curves">
+        <img src="/img/results/bug_curve.webp" width="2400" height="778" alt="Q-MDF of an ant: MIND outputs degenerate triangles along the legs, OffsetAxis outputs curve segments">
+        <figcaption><b>Surfaces and curves in one mesh.</b> The medial axis of thin parts is a curve: on a learned Q-MDF of an ant, we output segments where grid methods can only output degenerate triangles.</figcaption>
+      </figure>
+    </section>
+
+    <section id="citation">
+      <h2>BibTeX</h2>
+      <div class="bib">
+        <button type="button" class="copy" id="copy">Copy</button>
+        <pre id="bibtex">@inproceedings{huang2026offsetaxis,
+  title     = {OffsetAxis: UDF Mesh Reconstruction via Offset-Volume
+               Medial Axis Extraction},
+  author    = {Huang, Qijia and Kraemer, Pierre and Bechmann, Dominique},
+  booktitle = {SIGGRAPH Asia 2026 Conference Papers},
+  year      = {2026},
+  doi       = {10.1145/3829340.3842256}
+}</pre>
+      </div>
+    </section>
+  </main>
+
+  <footer class="wrap">ICube · Université de Strasbourg · CNRS</footer>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
