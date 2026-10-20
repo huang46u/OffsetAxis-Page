@@ -134,7 +134,12 @@
     <section id="results">
       <h2>Results</h2>
       <p class="kicker">Drag the divider to compare with prior UDF meshing methods; pick another method below.</p>
-      <div class="datasets" role="tablist" aria-label="Datasets" id="datasets"></div>
+      <div class="datasets" role="tablist" aria-label="Result groups" id="groups"></div>
+      <div class="models" role="group" aria-label="Models" id="models"></div>
+      <div class="view-toggle" role="group" aria-label="Q-MDF view" id="view-toggle" hidden>
+        <button type="button" data-view="mesh" aria-pressed="true">Mesh</button>
+        <button type="button" data-view="patches" aria-pressed="false">Patches</button>
+      </div>
       <div class="compare">
         <figure class="gt-box">
           <img id="gt-img" alt="Ground truth">

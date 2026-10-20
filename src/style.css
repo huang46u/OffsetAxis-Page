@@ -104,6 +104,17 @@ mark { color: inherit; font-weight: 600; background: linear-gradient(transparent
 .datasets button { border: 0; background: none; padding: 6px 14px; border-radius: 999px; color: var(--ink2); font-size: 14.5px; }
 .datasets button:hover { color: var(--ink); }
 .datasets button[aria-selected="true"] { background: var(--ink); color: var(--bg); }
+/* model pills: named subgroups form labelled clusters on one centred, wrapping row */
+.models { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 8px 24px; margin-bottom: 14px; }
+.cluster { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 4px; }
+.cluster-label { margin-right: 4px; font-size: 13px; color: var(--mut); }
+.models button { padding: 3px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--card); color: var(--ink2); font-size: 13.5px; }
+.models button:hover { border-color: var(--mut); color: var(--ink); }
+.models button[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--bg); }
+.view-toggle { display: flex; width: fit-content; margin: 0 auto 16px; padding: 3px; border-radius: 999px; background: var(--soft); }
+.view-toggle[hidden] { display: none; }
+.view-toggle button { padding: 4px 16px; border: 0; border-radius: 999px; background: none; color: var(--ink2); font-size: 13.5px; }
+.view-toggle button[aria-pressed="true"] { background: var(--card); color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(0, 0, 0, .08); }
 /* ground truth and swipe sit side by side; both boxes share one size so the aligned renders stay at the same scale */
 .compare { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
 .gt-box, .swipe { position: relative; height: min(500px, 64vh); margin: 0; background: transparent; border-radius: 14px; box-shadow: inset 0 0 0 1px var(--line); overflow: hidden; }

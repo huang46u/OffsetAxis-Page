@@ -141,6 +141,8 @@ interface Manifest {
   // the rays of the fast forward and their schedule (frames of the 2D animation, 20 fps)
   sampling: { rays: Ray[], extent: number, lengthRatio: number, radiusRatio: number, travelRatio: number, markerRatio: number, rayStart: number, diffusionStart: number }
   frames: { sampling2d: number, optimization2d: number, optimizationPlayback: [number, number] }
+  // the rays of the 2D sampling animation, drawn live in the browser (oaFrames.ts drawSampling2d)
+  sampling2d: { events: { entry: [number, number], exit: [number, number], times: number[] }[], rayEnd: number, frameCount: number }
   // connectivity of the last iteration before the thinning (connect.bin)
   connect: { iteration: number, faces: number, tetFaces: number, removed: number }
 }
@@ -274,6 +276,7 @@ export const pipelineClock = reactive({
   iteration: 0,
   frame2d: 1, // 2D frame (file number) of the timeline position
   frame2dExact: 1, // the same, unrounded: the page cross-fades between neighbouring frames
+  time2d: 0, // the same position, continuous (frames from 0), for the drawn sampling 2D
   ready: false,
   error: '',
 })
@@ -1035,6 +1038,7 @@ class PipelineStage {
     if (this.step === 'sampling') {
       clock.frame2dExact = Math.min(this.data!.manifest.frames.sampling2d, Math.max(f, sm.rayStart) + 1)
       clock.frame2d = Math.round(clock.frame2dExact)
+      clock.time2d = Math.max(f, sm.rayStart)
     }
     else if (this.step === 'optimization') {
       const [a, b] = this.data.manifest.frames.optimizationPlayback

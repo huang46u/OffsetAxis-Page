@@ -8,7 +8,7 @@
   取所有图 alpha > 20 的并集包围盒，四周各留 4% 边距，用同一个框裁剪全部图，
   再用同一缩放系数把最长边压到 1100 以内（LANCZOS），三者始终逐像素对齐。
 - 尺寸不同时，回退到包围盒配准：以 ours 为参考，把各方法的包围盒缩放并平移到 ours 的包围盒上。
-- 输出 webp quality 86；本次运行未写入的旧文件会被删除。
+- 输出 webp：默认 quality 86、最长边 1100；新集合在 SETS 中用 max_side / quality 覆盖。本次运行未写入的旧文件会被删除。
 """
 from pathlib import Path
 
@@ -31,7 +31,59 @@ TAGS_STD = {
     'dcudf': 'DCUDF', 'dcudf2': 'DCUDF2', 'mind': 'MIND',
 }
 
+# 锐利边缘集合（SharpEdge/<model>/，文件名 <model>_<Tag>_sharp.png）
+TAGS_SHARP = {
+    'gt': 'GT', 'ours': 'OffsetAxis', 'capudf': 'CAPUDF', 'dualmesh': 'DualMeshUDF',
+    'meshudf': 'MeshUDF', 'geoudf': 'GeoUDF', 'dcudf': 'DCUDF', 'dcudf2': 'DCUDF2', 'mind': 'MIND',
+}
+# 新增集合的尺寸/质量覆盖（用于控制体积）
+NEW_KW = {'max_side': 900, 'quality': 82}
+
+
+def sharp_set(model):
+    return {
+        'dir': COMP / 'SharpEdge' / model,
+        'files': {m: f'{model}_{t}_sharp.png' for m, t in TAGS_SHARP.items()},
+        **NEW_KW,
+    }
+
+
+def nm_set(n):
+    """非流形：NonManifold/nmabc_<n>_5way/，忽略 00a/00b。"""
+    p = f'nmabc_{n}'
+    return {
+        'dir': COMP / 'NonManifold' / f'{p}_5way',
+        'files': {
+            'gt': f'01_{p}_GroundTruth_nonmanifold.png',
+            'dualmesh': f'02_{p}_DualMeshUDF_nonmanifold.png',
+            'mind': f'03_{p}_MIND_nonmanifold.png',
+            'ours_udf': f'04_{p}_OffsetAxis_nonmanifold.png',
+            # ours = 三角面汤（triangle soup）结果，不是 UDF 结果 04_...
+            'ours': f'05_{p}_OffsetAxisTriangleSoup_nonmanifold.png',
+        },
+        **NEW_KW,
+    }
+
+
+def qmdf_set(parent, name):
+    """Q-MDF：QMDF/<parent>/<name>/，7 张图（网格线框 01-04，分片 05-07）。"""
+    return {
+        'dir': COMP / 'QMDF' / parent / name,
+        'files': {
+            'gt': f'01_{name}_input_mesh_wireframe.png',
+            'dcudf': f'02_{name}_dcudf_input_wireframe.png',
+            'mind': f'03_{name}_mind_input_wireframe.png',
+            'ours': f'04_{name}_offsetaxis_input_wireframe.png',
+            'ours_patch': f'05_{name}_offsetaxis_components.png',
+            'dcudf_patch': f'06_{name}_dcudf_components.png',
+            'mind_patch': f'07_{name}_mind_components.png',
+        },
+        **NEW_KW,
+    }
+
+
 # 集合名 -> 源目录 + 每个方法的源文件名（explicit 映射，缺失的方法会被跳过并报告）
+# 可选键 max_side / quality 覆盖全局 MAX_SIDE / WEBP_QUALITY
 SETS = {
     'copyroom': {
         'dir': COMP / '3dScene/256/copyroom',
@@ -49,24 +101,20 @@ SETS = {
             'gt': '18-9_GroundTruth.png',
         },
     },
-    'sharp020': {
-        'dir': COMP / 'SharpEdge/ABC_020',
-        'files': {
-            **{m: f'ABC_020_{t}_sharp.png' for m, t in TAGS_STD.items() if m not in ('gt', 'ours')},
-            'gt': 'ABC_020_GT_sharp.png',
-            'ours': 'ABC_020_OffsetAxis_sharp.png',
-        },
-    },
-    'nm007': {
-        'dir': COMP / 'NonManifold/nmabc_007_5way',
-        'files': {
-            'gt': '01_nmabc_007_GroundTruth_nonmanifold.png',
-            'dualmesh': '02_nmabc_007_DualMeshUDF_nonmanifold.png',
-            'mind': '03_nmabc_007_MIND_nonmanifold.png',
-            # ours = 三角面汤（triangle soup）结果，不是 UDF 结果 04_...
-            'ours': '05_nmabc_007_OffsetAxisTriangleSoup_nonmanifold.png',
-        },
-    },
+    'sharp_020': sharp_set('ABC_020'),
+    'sharp_14859': sharp_set('ABC_14859'),
+    'sharp_168': sharp_set('ABC_168'),
+    'sharp_275': sharp_set('ABC_275'),
+    'nm_007': nm_set('007'),
+    'nm_032': nm_set('032'),
+    'nm_038': nm_set('038'),
+    'nm_049': nm_set('049'),
+    'qmdf_fertility': qmdf_set('organic/256', 'fertility'),
+    'qmdf_teapot': qmdf_set('organic/256', 'teapot'),
+    'qmdf_bunny': qmdf_set('organic/256', 'bunny'),
+    'qmdf_abc020': qmdf_set('ABC/256', 'ABC_020'),
+    'qmdf_abc003': qmdf_set('ABC/256', 'ABC_003'),
+    'qmdf_abc093': qmdf_set('ABC/256', 'ABC_093'),
 }
 
 
@@ -95,16 +143,16 @@ def place(im, canvas_size, xy):
     return layer
 
 
-def cap_size(im):
-    """最长边压到 MAX_SIDE 以内（只缩小不放大）。"""
+def cap_size(im, max_side=MAX_SIDE):
+    """最长边压到 max_side 以内（只缩小不放大）。"""
     w, h = im.size
-    s = min(1.0, MAX_SIDE / max(w, h))
+    s = min(1.0, max_side / max(w, h))
     if s == 1.0:
         return im
     return im.resize((max(1, round(w * s)), max(1, round(h * s))), Image.LANCZOS)
 
 
-def crop_union(imgs):
+def crop_union(imgs, max_side=MAX_SIDE):
     """尺寸相同的一组图：用并集包围盒 + 4% 边距统一裁剪，再统一缩放。"""
     boxes = [bbox(im) for im in imgs.values()]
     x0 = min(b[0] for b in boxes)
@@ -117,7 +165,7 @@ def crop_union(imgs):
     # 先统一裁剪，再统一缩放：同一个框、同一个系数，保证逐像素对齐
     out = {m: im.crop(crop) for m, im in imgs.items()}
     cw, ch = next(iter(out.values())).size
-    s = min(1.0, MAX_SIDE / max(cw, ch))
+    s = min(1.0, max_side / max(cw, ch))
     print(f'    crop {cw}x{ch} -> scale {s:.4f}')
     if s < 1.0:
         out = {m: im.resize((round(im.width * s), round(im.height * s)), Image.LANCZOS)
@@ -125,7 +173,7 @@ def crop_union(imgs):
     return out
 
 
-def register_to_ref(imgs):
+def register_to_ref(imgs, max_side=MAX_SIDE):
     """尺寸不同时的回退路径：各方法的包围盒缩放、平移到 ours 的包围盒上。"""
     ref = imgs['ours']
     W, H = ref.size
@@ -146,7 +194,7 @@ def register_to_ref(imgs):
         out[m] = place(im2, (CW, CH), (round(rcx - cx), round(rcy - cy)))
         print(f'    {m}: scale {s:.3f} (w {rw / bw:.3f}, h {rh / bh:.3f})')
     # 配准画布也统一压到 MAX_SIDE 以内，与裁剪路径的输出尺寸一致
-    return {m: cap_size(im) for m, im in out.items()}
+    return {m: cap_size(im, max_side) for m, im in out.items()}
 
 
 def main():
@@ -172,16 +220,18 @@ def main():
             a = np.asarray(im)[..., 3]
             if (a == 255).all():
                 print(f'    WARNING {m}: 源图完全不透明（无透明背景）')
+        max_side = spec.get('max_side', MAX_SIDE)
+        quality = spec.get('quality', WEBP_QUALITY)
         if len(sizes) == 1:
-            print(f'    sizes identical {next(iter(sizes))} -> identical-size crop path')
-            out = crop_union(imgs)
+            print(f'    sizes identical {next(iter(sizes))} -> identical-size crop path (max_side {max_side}, q {quality})')
+            out = crop_union(imgs, max_side)
         else:
             print(f'    sizes differ {sorted(sizes)} -> registration path')
-            out = register_to_ref(imgs)
+            out = register_to_ref(imgs, max_side)
 
         for m, im in out.items():
             fn = f'{name}_{m}.webp'
-            im.save(OUT / fn, 'WEBP', quality=WEBP_QUALITY)
+            im.save(OUT / fn, 'WEBP', quality=quality)
             written.add(fn)
             print(f'    wrote {fn} {im.size[0]}x{im.size[1]}')
 

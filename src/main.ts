@@ -1,5 +1,7 @@
 import { effect } from '@vue/reactivity'
 import type { PipelineStep } from './pipeline/oaPipeline'
+import type { SamplingEvent } from './pipeline/oaFrames'
+import { GROUPS, type Dataset, type Group, type Method } from './results'
 
 const BASE = import.meta.env.BASE_URL
 const $ = <T extends HTMLElement = HTMLElement>(sel: string) => document.querySelector<T>(sel)!
@@ -165,68 +167,69 @@ playBtn.addEventListener('click', () => {
   clock.playing = !clock.playing
 })
 
-// 2D frames of the fast forward, in step with the timeline. They are decoded ahead and drawn on a
-// canvas, cross-fading between the two frames around the timeline position: the timeline plays the
-// 20 fps frames about 3× slower than the video, so single frames would step visibly.
+// 2D frames of the fast forward, in step with the timeline. oaFrames.ts decodes them ahead when the
+// stage starts, and the canvas is drawn at the timeline position. The sampling rays are drawn live
+// (the 20 fps frames would step); the diffusion and optimization frames cross-fade between neighbours.
 type FrameSet = 'sampling2d' | 'optimization2d'
 const FRAME_COUNT: Record<FrameSet, number> = { sampling2d: 70, optimization2d: 110 }
-const frames = new Map<FrameSet, (HTMLImageElement | null)[]>()
-function framePath(set: FrameSet, n: number) {
-  return `${BASE}oa/pipeline/${set}/${String(n).padStart(4, '0')}.webp`
-}
-function preloadFrames(set: FrameSet) {
-  if (frames.has(set))
-    return
-  const list: (HTMLImageElement | null)[] = Array.from({ length: FRAME_COUNT[set] }, () => null)
-  frames.set(set, list)
-  list.forEach((_, k) => {
-    const img = new Image()
-    img.src = framePath(set, k + 1)
-    img.decode().then(() => {
-      list[k] = img
-      if (k === 0)
-        drawFrame(set, 1)
-    }).catch(() => {})
-  })
-}
-/** Nearest decoded frame to file number n (1-based), or null. */
-function decoded(set: FrameSet, n: number) {
-  const list = frames.get(set)
-  if (!list)
-    return null
-  for (let d = 0; d < list.length; d++) {
-    const lo = list[n - 1 - d], hi = list[n - 1 + d]
-    if (lo)
-      return lo
-    if (hi)
-      return hi
-  }
-  return null
-}
-function drawFrame(set: FrameSet, x: number) {
+let frameLib: typeof import('./pipeline/oaFrames') | undefined
+let samplingData: { events: SamplingEvent[], rayEnd: number, frameCount: number } | undefined
+
+/** Draws decoded frame file n (1-based) of the set, with frame n + 1 faded in by alpha on top. */
+function crossFade(set: FrameSet, n: number, alpha: number) {
   const canvas = document.querySelector<HTMLCanvasElement>(`.frames[data-frames="${set}"]`)
-  const n = Math.max(1, Math.min(FRAME_COUNT[set], Math.floor(x)))
-  const a = decoded(set, n)
-  if (!canvas || !a)
+  if (!canvas || !frameLib)
+    return
+  const a = frameLib.decodedFrame(set, n)
+  if (!a)
     return
   const g = canvas.getContext('2d')!
   g.globalAlpha = 1
   g.drawImage(a, 0, 0, canvas.width, canvas.height)
-  const t = x - n
-  const b = n < FRAME_COUNT[set] ? frames.get(set)![n] : null
-  if (t > 0.01 && b) {
-    g.globalAlpha = t
+  const b = alpha > 0.01 && n < FRAME_COUNT[set] ? frameLib.decodedFrame(set, n + 1) : undefined
+  if (b) {
+    g.globalAlpha = alpha
     g.drawImage(b, 0, 0, canvas.width, canvas.height)
     g.globalAlpha = 1
   }
 }
 
+/** Sampling 2D at the continuous position t (frames from 0): rays live, then the diffusion frames. */
+function drawSampling(t: number) {
+  const canvas = document.querySelector<HTMLCanvasElement>('.frames[data-frames="sampling2d"]')
+  if (!canvas || !frameLib || !samplingData)
+    return
+  const { events, rayEnd, frameCount } = samplingData
+  if (t > 0 && t <= rayEnd) {
+    // rays: the clean background (frame 1) with the rays drawn at the continuous position
+    const base = frameLib.decodedFrame('sampling2d', 1)
+    if (base)
+      frameLib.drawSampling2d(canvas.getContext('2d')!, base, events, t)
+    return
+  }
+  if (t > rayEnd) {
+    // diffusion: the frames are sparse, so cross-fade the two around the position
+    const i = Math.floor(t)
+    crossFade('sampling2d', Math.min(frameCount, Math.max(1, i + 1)), t - i)
+    return
+  }
+  crossFade('sampling2d', 1, 0)
+}
+
+/** Optimization 2D at the frame position x (file numbers from 1). */
+function drawOptimization(x: number) {
+  const n = Math.max(1, Math.min(FRAME_COUNT.optimization2d, Math.floor(x)))
+  crossFade('optimization2d', n, x - n)
+}
+
 async function startStage() {
   pipeline = await import('./pipeline/oaPipeline')
+  frameLib = await import('./pipeline/oaFrames')
+  samplingData = (await pipeline.loadPipeline()).manifest.sampling2d
   stage = pipeline.pipelineStage()
   stage.attach($('#stage'))
-  preloadFrames('sampling2d')
-  preloadFrames('optimization2d')
+  frameLib.preloadFrames('sampling2d').catch(err => console.warn(err))
+  frameLib.preloadFrames('optimization2d').catch(err => console.warn(err))
   const clock = pipeline.pipelineClock
 
   new IntersectionObserver(([e]) => { stage!.ps.active = e.isIntersecting }).observe($('#stage'))
@@ -248,11 +251,18 @@ async function startStage() {
     iter.hidden = !key.startsWith('optimization')
     iter.textContent = `iteration ${Math.round(iteration)}`
   })
+  // read the clock first (see above): the frames are drawn at the timeline position, and again
+  // when a frame gets decoded (frameVersion is read so that the effect tracks it)
   effect(() => {
-    const x = clock.frame2dExact
+    const x = clock.frame2dExact, t = clock.time2d
+    const versions = [frameLib?.frameVersion.sampling2d, frameLib?.frameVersion.optimization2d]
     const set = STEPS[current].frames
-    if (set)
-      drawFrame(set, x)
+    if (!set || !frameLib || !versions)
+      return
+    if (set === 'sampling2d')
+      drawSampling(t)
+    else
+      drawOptimization(x)
   })
   // a finished timeline moves on to the next click of the step
   effect(() => {
@@ -277,126 +287,103 @@ selectStep(0)
 
 // ------------------------------------------------------------------ results: swipe comparison
 
-interface Method { id: string, name: string, stat?: string }
-/** `res`: grid resolution the baselines extracted their meshes at (ours is grid-free) */
-interface Dataset { id: string, name: string, res: string, ours: string, methods: Method[], note: string }
-// per-model numbers from the paper figures (Fig. 13-15; CD ×10⁻³); ABC and non-manifold: averages of Tables 2-3
-const DATASETS: Dataset[] = [
-  {
-    id: 'copyroom', name: '3DScene', res: '256³', ours: '#V 46.6K · CD 2.21',
-    methods: [
-      { id: 'gt', name: 'Ground truth', stat: 'Copyroom' },
-      { id: 'capudf', name: 'CAP-UDF', stat: '#V 241.2K · CD 1.96' },
-      { id: 'dualmesh', name: 'DualMesh-UDF', stat: '#V 247.9K · CD 1.88' },
-      { id: 'meshudf', name: 'MeshUDF', stat: '#V 199.9K · CD 3.77' },
-      { id: 'geoudf', name: 'GeoUDF', stat: '#V 167.6K · CD 1.84' },
-      { id: 'mind', name: 'MIND', stat: '#V 119.8K · CD 3.16' },
-      { id: 'dcudf', name: 'DCUDF', stat: '#V 286.9K · CD 2.74' },
-      { id: 'dcudf2', name: 'DCUDF2', stat: '#V 447.9K · CD 2.22' },
-    ],
-    note: 'A scanned room, baselines at 256³: a similar Chamfer distance (×10⁻³) with <b>3 to 10× fewer vertices</b>.',
-  },
-  {
-    id: 'car', name: 'ShapeNetCar', res: '256³', ours: '#V 17.4K · CD 1.52',
-    methods: [
-      { id: 'gt', name: 'Ground truth', stat: 'ShapeNetCar' },
-      { id: 'capudf', name: 'CAP-UDF', stat: '#V 201.3K · CD 2.11' },
-      { id: 'dualmesh', name: 'DualMesh-UDF', stat: '#V 228.1K · CD 2.21' },
-      { id: 'meshudf', name: 'MeshUDF', stat: '#V 164.7K · CD 2.33' },
-      { id: 'geoudf', name: 'GeoUDF', stat: '#V 140.5K · CD 1.95' },
-      { id: 'mind', name: 'MIND', stat: '#V 101.3K · CD 1.68' },
-      { id: 'dcudf', name: 'DCUDF', stat: '#V 302.3K · CD 1.91' },
-      { id: 'dcudf2', name: 'DCUDF2', stat: '#V 434.3K · CD 1.90' },
-    ],
-    note: 'A car with its interior, baselines at 256³: <b>the best Chamfer distance</b> with 6 to 25× fewer vertices.',
-  },
-  {
-    id: 'garment', name: 'DeepFashion', res: '128³', ours: '#V 15.2K · CD 2.13',
-    methods: [
-      { id: 'gt', name: 'Ground truth', stat: 'DeepFashion 18-9' },
-      { id: 'capudf', name: 'CAP-UDF', stat: '#V 49.9K · CD 2.87' },
-      { id: 'dualmesh', name: 'DualMesh-UDF', stat: '#V 56.2K · CD 1.80' },
-      { id: 'meshudf', name: 'MeshUDF', stat: '#V 45.4K · CD 4.08' },
-      { id: 'geoudf', name: 'GeoUDF', stat: '#V 33.5K · CD 2.75' },
-      { id: 'mind', name: 'MIND', stat: '#V 26.5K · CD 3.16' },
-      { id: 'dcudf', name: 'DCUDF', stat: '#V 79.7K · CD 2.79' },
-      { id: 'dcudf2', name: 'DCUDF2', stat: '#V 92.7K · CD 2.55' },
-    ],
-    note: 'An open garment, baselines at 128³: comparable accuracy with the most compact mesh.',
-  },
-  {
-    id: 'sharp020', name: 'Sharp features', res: '128³', ours: 'edge-CD 12.89 · 22.6K',
-    methods: [
-      { id: 'gt', name: 'Ground truth', stat: 'ABC' },
-      { id: 'capudf', name: 'CAP-UDF', stat: 'edge-CD 19.42 · 46.0K' },
-      { id: 'dualmesh', name: 'DualMesh-UDF', stat: 'edge-CD 28.33 · 47.8K' },
-      { id: 'meshudf', name: 'MeshUDF', stat: 'edge-CD 20.21 · 45.3K' },
-      { id: 'geoudf', name: 'GeoUDF', stat: 'edge-CD 35.45 · 36.4K' },
-      { id: 'mind', name: 'MIND', stat: 'edge-CD 99.53 · 27.8K' },
-      { id: 'dcudf', name: 'DCUDF', stat: 'edge-CD 74.08 · 43.5K' },
-      { id: 'dcudf2', name: 'DCUDF2', stat: 'edge-CD 40.99 · 49.0K' },
-    ],
-    note: 'Averages over 100 ABC models (sharp edges at a 45° dihedral angle; baselines at 128³): <b>the best sharp-edge Chamfer distance</b> with the most compact mesh.',
-  },
-  {
-    id: 'nm007', name: 'Non-manifold', res: '128³', ours: 'triangle soup · NM edge-CD 18.13 · 31.5K',
-    methods: [
-      { id: 'gt', name: 'Ground truth', stat: 'intersected ABC' },
-      { id: 'dualmesh', name: 'DualMesh-UDF', stat: 'NM edge-CD 65.64 · 80.2K' },
-      { id: 'mind', name: 'MIND', stat: 'NM edge-CD 44.18 · 51.5K' },
-    ],
-    note: 'Averages over 50 intersected ABC models, baselines at 128³. Ours queries the distance to the triangle soup directly; non-manifold junctions come out as a single sheet.',
-  },
-]
-
 const swipe = $('#swipe')
 const baseImg = $<HTMLImageElement>('#swipe-base'), oursImg = $<HTMLImageElement>('#swipe-ours')
 const gtImg = $<HTMLImageElement>('#gt-img'), tagGt = $('#tag-gt')
-const tagBase = $('#tag-base'), tagOurs = $('#tag-ours'), thumbs = $('#thumbs'), datasetsEl = $('#datasets')
+const tagBase = $('#tag-base'), tagOurs = $('#tag-ours'), thumbs = $('#thumbs')
+const groupsEl = $('#groups'), modelsEl = $('#models'), viewEl = $('#view-toggle')
 const resultPath = (d: string, m: string) => `${BASE}img/results/aligned/${d}_${m}.webp`
 
-const resolution = (d: Dataset, m: Method) => (m.id === 'gt' ? '' : `${d.res} grid`)
+let shownSet = GROUPS[0].subgroups[0].sets[0]
+let baseId = '' // the baseline left of the divider, kept when switching Mesh / Patches
+let patchView = false // Q-MDF: colour the manifold patches instead of the plain mesh
+
+// GT stays the input mesh; the other renders switch to their patch variant
+const imgOf = (d: Dataset, m: string) => resultPath(d.id, patchView && d.patches && m !== 'gt' ? `${m}_patch` : m)
+// ours and its variants are grid-free; GT has no grid
+const resolution = (d: Dataset, m: Method) => (m.id === 'gt' || m.id.startsWith('ours') ? '' : `${d.res} grid`)
 const statLine = (...parts: (string | undefined)[]) => parts.filter(Boolean).join(' · ')
 
-function pickMethod(d: Dataset, m: Method) {
-  baseImg.src = resultPath(d.id, m.id)
+function pickMethod(m: Method) {
+  baseId = m.id
+  baseImg.src = imgOf(shownSet, m.id)
   baseImg.alt = `${m.name} reconstruction`
-  tagBase.innerHTML = `${m.name}<small>${resolution(d, m)}</small>` // the numbers are under the thumbnails
+  tagBase.innerHTML = `${m.name}<small>${resolution(shownSet, m)}</small>` // the numbers are under the thumbnails
   thumbs.querySelectorAll<HTMLButtonElement>('button[data-m]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.m === m.id)))
 }
 
-function pickDataset(d: Dataset) {
-  datasetsEl.querySelectorAll('button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.d === d.id)))
+// draws the shownSet set: GT, ours, the thumbnails of every baseline and the note
+function renderSet() {
+  const d = shownSet
   const gt = d.methods.find(m => m.id === 'gt')!
   gtImg.src = resultPath(d.id, 'gt')
   tagGt.innerHTML = `${gt.name}<small>${statLine(gt.stat)}</small>`
-  const picks = d.methods.filter(m => m.id !== 'gt')
-  oursImg.src = resultPath(d.id, 'ours')
+  oursImg.src = imgOf(d, 'ours')
   oursImg.alt = 'OffsetAxis reconstruction'
-  tagOurs.innerHTML = `Ours<small>grid-free</small>`
+  tagOurs.innerHTML = 'Ours<small>grid-free</small>'
   thumbs.replaceChildren()
   const ours = Object.assign(document.createElement('button'), { type: 'button', className: 'is-ours', disabled: true })
-  ours.innerHTML = `<img src="${resultPath(d.id, 'ours')}" alt="">Ours<small>${statLine('grid-free', d.ours)}</small>`
+  ours.innerHTML = `<img src="${imgOf(d, 'ours')}" alt="">Ours<small>${statLine('grid-free', d.ours)}</small>`
   thumbs.append(ours)
+  const picks = d.methods.filter(m => m.id !== 'gt')
   for (const m of picks) {
     const b = Object.assign(document.createElement('button'), { type: 'button' })
     b.dataset.m = m.id
-    b.innerHTML = `<img src="${resultPath(d.id, m.id)}" alt="">${m.name}<small>${statLine(resolution(d, m), m.stat)}</small>`
-    b.addEventListener('click', () => pickMethod(d, m))
+    b.innerHTML = `<img src="${imgOf(d, m.id)}" alt="">${m.name}<small>${statLine(resolution(d, m), m.stat)}</small>`
+    b.addEventListener('click', () => pickMethod(m))
     thumbs.append(b)
   }
   $('#dataset-note').innerHTML = d.note
-  pickMethod(d, picks[0])
+  pickMethod(picks.find(m => m.id === baseId) ?? picks[0])
 }
 
-for (const d of DATASETS) {
-  const b = Object.assign(document.createElement('button'), { type: 'button', textContent: d.name })
-  b.setAttribute('role', 'tab')
-  b.dataset.d = d.id
-  b.addEventListener('click', () => pickDataset(d))
-  datasetsEl.append(b)
+function selectSet(d: Dataset) {
+  shownSet = d
+  baseId = d.methods.find(m => m.id !== 'gt')!.id
+  modelsEl.querySelectorAll<HTMLButtonElement>('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.d === d.id)))
+  viewEl.hidden = !d.patches
+  renderSet()
 }
-pickDataset(DATASETS[0])
+
+function selectGroup(g: Group) {
+  groupsEl.querySelectorAll<HTMLButtonElement>('button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.g === g.id)))
+  modelsEl.replaceChildren()
+  for (const sub of g.subgroups) {
+    const cluster = document.createElement('div')
+    cluster.className = 'cluster'
+    if (sub.name) {
+      const label = document.createElement('span')
+      label.className = 'cluster-label'
+      label.textContent = sub.name
+      cluster.append(label)
+    }
+    for (const d of sub.sets) {
+      const b = Object.assign(document.createElement('button'), { type: 'button', textContent: d.name })
+      b.dataset.d = d.id
+      b.addEventListener('click', () => selectSet(d))
+      cluster.append(b)
+    }
+    modelsEl.append(cluster)
+  }
+  selectSet(g.subgroups[0].sets[0])
+}
+
+for (const g of GROUPS) {
+  const b = Object.assign(document.createElement('button'), { type: 'button', textContent: g.name })
+  b.setAttribute('role', 'tab')
+  b.dataset.g = g.id
+  b.addEventListener('click', () => selectGroup(g))
+  groupsEl.append(b)
+}
+
+viewEl.querySelectorAll<HTMLButtonElement>('button').forEach((b) => {
+  b.addEventListener('click', () => {
+    patchView = b.dataset.view === 'patches'
+    viewEl.querySelectorAll<HTMLButtonElement>('button').forEach(v => v.setAttribute('aria-pressed', String(v === b)))
+    renderSet()
+  })
+})
+selectGroup(GROUPS[0])
 
 function setDivider(pct: number) {
   const x = Math.max(0, Math.min(100, pct))
