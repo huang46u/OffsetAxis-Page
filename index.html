@@ -87,7 +87,6 @@
           <article data-step="0">
             <h3><i>1</i>Input: an unsigned distance field</h3>
             <p>We follow the UDF of the Stanford bunny through the pipeline. The slice shows the distance to the surface with iso-lines.</p>
-            <p>As the slice sweeps through the shape, the field <b>never changes sign</b>: there is nothing for Marching Cubes to work with.</p>
             <div class="legend"><span>0</span><i></i><span>far</span></div>
           </article>
           <article data-step="1" hidden>
@@ -99,13 +98,13 @@
               <text x="72" y="22" font-size="17" font-style="italic" font-family="Georgia, serif" fill="#555">α</text>
               <path d="M0 0 L0 -95 M0 0 L-82 47 M0 0 L82 47" fill="none" stroke="#17191e" stroke-width="2.5" stroke-linecap="round"/>
             </svg>
-            <p>A non-manifold input has no inside. But its <b>α-offset volume</b> {UDF ≤ α} is always a closed, manifold solid (the cyan line on the slice).</p>
-            <p>Its <b>medial axis</b> recovers the input, with boundaries, junctions and curves. We never build the offset surface: we only sample it.</p>
+            <p>A non-manifold input has no inside/outside. But its <b>α-offset volume</b> {UDF ≤ α} is always a closed, manifold solid (the cyan line on the slice).</p>
+            <p>Its <b>medial axis</b> could recovers the topologies of the input if α is smaller than the weak feature size.</p>
           </article>
           <article data-step="2" hidden>
             <h3><i>3</i>Sampling, without a grid</h3>
             <canvas class="frames" data-frames="sampling2d" width="512" height="512" role="img" aria-label="2D illustration: rays find the offset surface, then Poisson disk sampling spreads over it"></canvas>
-            <p>Rays stop where UDF = α and leave seeds on both sides of the shape <span class="cite">[Ling et al. 2025]</span>. Poisson disk sampling then spreads from the seeds over the whole level set: <b>no mesh, no voxel grid</b>.</p>
+            <p>Rays stop where UDF = α and leave seeds on both sides of the shape <span class="cite">[Ling et al. 2025]</span>. Poisson disk sampling then spreads from the seeds over the whole level set.</p>
           </article>
           <article data-step="3" hidden>
             <h3><i>4</i>Initial medial spheres</h3>
@@ -125,8 +124,8 @@
           </article>
           <article data-step="5" hidden>
             <h3><i>6</i>The mesh is the dual of the clusters</h3>
-            <p>Sphere centres become vertices; two spheres are linked when neighbouring samples belong to them. Triangles are 3-cliques; the few tetrahedra left (orange) are removed by thinning <span class="cite">[Wang et al. 2025]</span>.</p>
-            <p>The output has only <b>triangles and segments</b>: no tetrahedra.</p>
+            <p>Sphere centres become vertices; two spheres are linked when neighbouring samples belong to them. Triangles are 3-cliques; the few tetrahedra left (orange) are removed by thinning procedure inspired by <span class="cite">[Wang et al. 2025]</span>.</p>
+            <p>The output has only <b>triangles and segments</b>.</p>
           </article>
         </div>
       </div>
