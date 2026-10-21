@@ -358,6 +358,7 @@ class PipelineStage {
   arrows: THREE.InstancedMesh[] = [] // shafts, heads
   contacts: THREE.InstancedMesh | null = null
   rayPaths: RayPath[] = []
+  rays: Ray[] = [] // the fast forward rays, then EXTRA_RAYS more (extraRays)
   contactsDone = false
   spheres: THREE.InstancedMesh | null = null
   sphereUniforms: Record<string, THREE.IUniform> = {}
@@ -616,7 +617,8 @@ class PipelineStage {
     const shaft = new THREE.CylinderGeometry(r, r, L, 12).translate(0, -0.62 * L, 0)
     const head = new THREE.ConeGeometry(3 * r, 0.12 * L, 16).translate(0, -0.06 * L, 0)
     const rayMat = new THREE.MeshBasicMaterial({ transparent: true }) // emission
-    const count = sm.rays.length
+    this.rays = [...sm.rays, ...extraRays(d)]
+    const count = this.rays.length
     this.arrows = [shaft, head].map(g => new THREE.InstancedMesh(g, rayMat, count))
     const dotMat = new THREE.MeshBasicMaterial({ transparent: true })
     this.contacts = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(sm.extent * sm.markerRatio, 2), dotMat, 32 * count)
@@ -750,7 +752,7 @@ class PipelineStage {
     const step = 0.0015
     const reach = sm.extent * sm.travelRatio
     const p = new THREE.Vector3()
-    this.rayPaths = sm.rays.map((r) => {
+    this.rayPaths = this.rays.map((r) => {
       const origin = new THREE.Vector3(...r.entry)
       const exit = new THREE.Vector3(...r.exit)
       const length = exit.distanceTo(origin)
@@ -1532,6 +1534,10 @@ const RUN_ALPHA = 0.005 // α of the run (bunny units): the samples (samples.bin
 const COVER_SPAN = 0.75
 const COVER_GROW = 0.04
 const INSET_DOT = 0.5 // sample dots in the inset, × their size
+// rays added to the 20 of the fast forward, so that the seeds reach the left ear too; the seed of
+// their random draw was picked for that (6 contacts on the left ear, 4 on the right one)
+const EXTRA_RAYS = 12
+const RAY_SEED = 22
 const SAMPLE_AO_NEIGHBORS = 8 // kept samples that darken each ball (sampling step)
 
 /** Blender Hue/Saturation/Value (hue 0.5: unchanged) then Bright/Contrast, on linear RGB. */
@@ -1751,6 +1757,52 @@ vec3 sliceColor() {
   float apx = fwidth(d);
   return mix(col, uAlphaColor, uAlphaOn * (1.0 - smoothstep(1.0 * apx, 2.5 * apx, ad)));
 }`
+
+/** mulberry32: a small seeded random generator, uniform in [0, 1). */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0
+  return () => {
+    a = (a + 0x6D2B79F5) >>> 0
+    let t = a
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+/**
+ * EXTRA_RAYS random rays: each through a random bunny vertex, in a random direction (bunny units);
+ * the contacts are found along the line (computeContacts). Their schedule is that of the fast
+ * forward rays: a start in the same span, then the median durations of its steps (frames).
+ */
+function extraRays(d: PipelineData): Ray[] {
+  const rnd = mulberry32(RAY_SEED)
+  const V = d.bunnyPos
+  const n = V.length / 3
+  const lines = Array.from({ length: EXTRA_RAYS }, () => {
+    const v = Math.floor(rnd() * n)
+    const z = 2 * rnd() - 1
+    const phi = 2 * Math.PI * rnd()
+    const s = Math.sqrt(1 - z * z)
+    const dir = [s * Math.cos(phi), s * Math.sin(phi), z]
+    const p = [V[3 * v], V[3 * v + 1], V[3 * v + 2]]
+    return { entry: p.map((x, i) => x - 0.3 * dir[i]) as Vec3, exit: p.map((x, i) => x + 0.3 * dir[i]) as Vec3 }
+  })
+  const rays = d.manifest.sampling.rays
+  const starts = rays.map(r => r.frames[0])
+  const first = Math.min(...starts)
+  const last = Math.max(...starts)
+  const steps = [1, 2, 3, 4, 5].map((k) => {
+    const s = rays.map(r => r.frames[k] - r.frames[k - 1]).sort((a, b) => a - b)
+    return s[Math.floor(s.length / 2)]
+  })
+  return lines.map((l) => {
+    const frames = [first + rnd() * (last - first)]
+    for (const s of steps)
+      frames.push(frames[frames.length - 1] + s)
+    return { ...l, frames }
+  })
+}
 
 /** Poisson disk subset of the samples (random order, greedy): 0 if kept, 1 if not. */
 function poissonKeep(pos: Float32Array, spacing: number): Float32Array {
