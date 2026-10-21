@@ -66,6 +66,9 @@ export interface OaSettings {
   spheres: { saturation: number, bright: number, contrast: number, ao: number, roughness: number, radiusScale: number } // medial_balls_material_controlled
   mesh: { color: Vec3, saturation: number, bright: number, contrast: number, roughness: number, wire: number, wireOpacity: number, wireWidth: number } // optimization_mesh_material_controlled; wireWidth: px
   samples: { color: Vec3, roughness: number, size: number } // offset_boundary_material; size: dot diameter (bunny units)
+  // the sampling step: the sheet outside the surface and the one inside, in two colours, with
+  // smaller dots (× sheetSize) so that the inner sheet shows between them
+  sheets: { outer: Vec3, inner: Vec3, sheetSize: number }
   rays: { color: Vec3, contact: Vec3 } // sampling_ray_material, sampling_contact_material (emission)
   seconds: { sweep: number, rays: number, diffusion: number, coverage: number, optimization: number, thinning: number, transition: number } // timeline lengths, step-to-step camera move
 }
@@ -100,6 +103,7 @@ export const OA_DEFAULTS: OaSettings = {
   spheres: { saturation: 1.3, bright: 0, contrast: 1, ao: 0.5, roughness: 0.7, radiusScale: 1.5 },
   mesh: { color: [0.4078, 0.6588, 0.5686], saturation: 1.3, bright: 0, contrast: 1, roughness: 0.7, wire: 0.015, wireOpacity: 1, wireWidth: 1 },
   samples: { color: [0.32, 0.53, 0.73], roughness: 0.5, size: 0.0042 },
+  sheets: { outer: [0.04, 0.25, 0.6], inner: [0.75, 0.4, 0], sheetSize: 0.75 }, // deck blue, amber (darker: the shading lightens them)
   rays: { color: [0.08, 0.25, 0.35], contact: [1, 0.025, 0.005] },
   // the fast forward plays rays 1.5 s, diffusion 1 s, iterations 3.5 s: slower here, for the talk
   seconds: { sweep: 8, rays: 4.5, diffusion: 3, coverage: 6, optimization: 8, thinning: 3, transition: 1.5 },
@@ -217,6 +221,7 @@ interface SceneSpec {
   rays?: boolean // sampling rays play (the timeline = the ray part of the fast forward schedule)
   samples: number // 0: hidden, 1: all shown; with `grow`, spread from the ray contacts
   grow?: boolean
+  sheets?: boolean // the two sample sheets in two colours (OaSettings.sheets)
   spheres: number
   mesh: number
   optimize?: boolean // spheres and mesh play the iterations
@@ -247,7 +252,7 @@ export const SCENES: Record<PipelineStep, SceneSpec[]> = {
   ],
   sampling: [
     { ...S0, rays: true, duration: 'rays' },
-    { ...S0, samples: 1, grow: true, duration: 'diffusion' },
+    { ...S0, samples: 1, grow: true, sheets: true, duration: 'diffusion' },
   ],
   init: [
     // the samples (each has a candidate sphere), then the greedy coverage, seen in a large inset
@@ -309,7 +314,7 @@ class PipelineStage {
   step: PipelineStep = 'udf'
   click = 0
   spec: SceneSpec = S0
-  cur = { shell: 1, solid: 0, tint: 0, slice: 0, alphaLine: 0, samples: 0, spheres: 0, mesh: 0, rays: 0, connect: 0 }
+  cur = { shell: 1, solid: 0, tint: 0, slice: 0, alphaLine: 0, samples: 0, spheres: 0, mesh: 0, rays: 0, connect: 0, sheets: 0 }
   last = 0
 
   // step views: the pose shown, and the move between two steps
@@ -557,10 +562,14 @@ class PipelineStage {
     geo.setAttribute('aReveal', new THREE.BufferAttribute(new Float32Array(n), 1)) // computeContacts
     geo.setAttribute('aCover', new THREE.BufferAttribute(new Float32Array(n), 1)) // computeCoverage
     geo.setAttribute('aTint', new THREE.BufferAttribute(new Float32Array(3 * n), 3))
+    geo.setAttribute('aSide', new THREE.BufferAttribute(sampleSides(d), 1))
     this.sampleUniforms = {
       uSize: { value: 0 },
       uViewportHeight: { value: 500 },
       uColor: { value: new THREE.Color() },
+      uOuter: { value: new THREE.Color() },
+      uInner: { value: new THREE.Color() },
+      uSheets: { value: 0 },
       uProgress: { value: 0 },
       uCover: { value: -1 }, // coverage time (-1: off)
       uOpacity: { value: 0 },
@@ -940,6 +949,8 @@ class PipelineStage {
       w.material.linewidth = mesh.wireWidth
     }
     lin(samples.color, this.sampleUniforms.uColor.value)
+    lin(settings.sheets.outer, this.sampleUniforms.uOuter.value)
+    lin(settings.sheets.inner, this.sampleUniforms.uInner.value)
     this.sampleUniforms.uSize.value = samples.size
     lin(rays.color, (this.arrows[0].material as THREE.MeshBasicMaterial).color)
     lin(rays.contact, (this.contacts!.material as THREE.MeshBasicMaterial).color)
@@ -1018,7 +1029,7 @@ class PipelineStage {
   apply(instant: boolean) {
     if (instant) {
       const s = this.spec
-      Object.assign(this.cur, { shell: s.shell, solid: s.solid ?? 0, tint: s.tint ?? 0, slice: s.slice, alphaLine: s.alphaLine, samples: s.samples && !s.grow ? 1 : 0, spheres: s.spheres, mesh: s.mesh, rays: s.rays ? 1 : 0, connect: s.connect ?? 0 })
+      Object.assign(this.cur, { shell: s.shell, solid: s.solid ?? 0, tint: s.tint ?? 0, slice: s.slice, alphaLine: s.alphaLine, samples: s.samples && !s.grow ? 1 : 0, spheres: s.spheres, mesh: s.mesh, rays: s.rays ? 1 : 0, connect: s.connect ?? 0, sheets: s.sheets ? 1 : 0 })
     }
   }
 
@@ -1056,6 +1067,7 @@ class PipelineStage {
     ease('spheres', s.spheres)
     ease('mesh', s.mesh)
     ease('rays', s.rays || s.grow ? 1 : 0)
+    ease('sheets', s.sheets ? 1 : 0)
     // move between two step views (eased)
     if (this.move) {
       const { from, to, t0 } = this.move
@@ -1122,6 +1134,7 @@ class PipelineStage {
     const samples = this.samples!
     samples.visible = this.cur.samples > 0.01
     this.sampleUniforms.uOpacity.value = this.cur.samples
+    this.sampleUniforms.uSheets.value = this.cur.sheets
     this.sampleUniforms.uProgress.value = s.grow ? clock.progress * 1.02 : 1.02
     // coverage: kept while the samples fade out on the next step (they would come back otherwise)
     if (s.cover)
@@ -1343,6 +1356,7 @@ class PipelineStage {
         // dot size in this view; smaller in the inset (individual samples, both sheets)
         this.sampleUniforms.uViewportHeight.value = vh * renderer.getPixelRatio()
         this.sampleUniforms.uSize.value = this.settings.samples.size * (cam === this.insetCamera ? INSET_DOT : 1)
+          * THREE.MathUtils.lerp(1, this.settings.sheets.sheetSize, this.cur.sheets)
       }
       // wire widths are in pixels of the view drawn
       for (const w of [this.wire, ...this.connectWires])
@@ -1638,6 +1652,68 @@ vec3 sliceColor() {
   return mix(col, uAlphaColor, uAlphaOn * (1.0 - smoothstep(1.0 * apx, 2.5 * apx, ad)));
 }`
 
+/**
+ * Side of each sample (0: outside the surface, 1: inside): the side of the nearest bunny vertex,
+ * along its normal. The samples lie at ±α from the surface, much closer than this test needs.
+ */
+function sampleSides(d: PipelineData): Float32Array {
+  const V = d.bunnyPos
+  const F = d.bunnyIndex
+  const nv = V.length / 3
+  const N = new Float32Array(V.length)
+  const a = new THREE.Vector3()
+  const b = new THREE.Vector3()
+  const c = new THREE.Vector3()
+  for (let t = 0; t < F.length; t += 3) {
+    a.fromArray(V, 3 * F[t])
+    b.fromArray(V, 3 * F[t + 1]).sub(a)
+    c.fromArray(V, 3 * F[t + 2]).sub(a)
+    b.cross(c) // area-weighted face normal
+    for (let k = 0; k < 3; k++) {
+      N[3 * F[t + k]] += b.x
+      N[3 * F[t + k] + 1] += b.y
+      N[3 * F[t + k] + 2] += b.z
+    }
+  }
+  const h = 0.02 // hash cell (bunny units), several vertex spacings
+  const key = (x: number, y: number, z: number) => `${x},${y},${z}`
+  const cells = new Map<string, number[]>()
+  for (let i = 0; i < nv; i++) {
+    const k = key(Math.floor(V[3 * i] / h), Math.floor(V[3 * i + 1] / h), Math.floor(V[3 * i + 2] / h))
+    if (!cells.has(k))
+      cells.set(k, [])
+    cells.get(k)!.push(i)
+  }
+  const P = d.samplePos
+  const side = new Float32Array(P.length / 3)
+  for (let s = 0; s < side.length; s++) {
+    const x = P[3 * s]
+    const y = P[3 * s + 1]
+    const z = P[3 * s + 2]
+    const cx = Math.floor(x / h)
+    const cy = Math.floor(y / h)
+    const cz = Math.floor(z / h)
+    let best = -1
+    let bd = Infinity
+    for (let i = -1; i <= 1; i++) {
+      for (let j = -1; j <= 1; j++) {
+        for (let k = -1; k <= 1; k++) {
+          for (const v of cells.get(key(cx + i, cy + j, cz + k)) ?? []) {
+            const dd = (V[3 * v] - x) ** 2 + (V[3 * v + 1] - y) ** 2 + (V[3 * v + 2] - z) ** 2
+            if (dd < bd) {
+              bd = dd
+              best = v
+            }
+          }
+        }
+      }
+    }
+    if (best >= 0)
+      side[s] = (x - V[3 * best]) * N[3 * best] + (y - V[3 * best + 1]) * N[3 * best + 1] + (z - V[3 * best + 2]) * N[3 * best + 2] < 0 ? 1 : 0
+  }
+  return side
+}
+
 // round dots of a fixed size in bunny units, shaded as small spheres by the three lights
 // (offset_boundary_material: diffuse part of the Principled BSDF)
 const POINTS_VERT = /* glsl */`
@@ -1648,10 +1724,13 @@ uniform float uCover;
 attribute float aReveal;
 attribute float aCover;
 attribute vec3 aTint;
+attribute float aSide;
 varying float vShow;
 varying vec3 vTint;
 varying float vTintOn;
+varying float vSide;
 void main() {
+  vSide = aSide;
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
   gl_Position = projectionMatrix * mv;
   float scale = length(modelMatrix[0].xyz);
@@ -1667,6 +1746,9 @@ void main() {
 
 const POINTS_FRAG = /* glsl */`
 uniform vec3 uColor;
+uniform vec3 uOuter;
+uniform vec3 uInner;
+uniform float uSheets;
 uniform float uOpacity;
 uniform vec3 uLightDir[3];
 uniform float uLightE[3];
@@ -1674,6 +1756,7 @@ uniform float uAmbient;
 varying float vShow;
 varying vec3 vTint;
 varying float vTintOn;
+varying float vSide;
 void main() {
   vec2 p = gl_PointCoord * 2.0 - 1.0;
   float r2 = dot(p, p);
@@ -1682,7 +1765,8 @@ void main() {
   float e = uAmbient * 3.14159265;
   for (int i = 0; i < 3; i++)
     e += uLightE[i] * max(dot(n, uLightDir[i]), 0.0);
-  gl_FragColor = vec4(mix(uColor, vTint, vTintOn) / 3.14159265 * e, uOpacity);
+  vec3 base = mix(uColor, mix(uOuter, uInner, vSide), uSheets);
+  gl_FragColor = vec4(mix(base, vTint, vTintOn) / 3.14159265 * e, uOpacity);
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
 }`
