@@ -92,14 +92,17 @@
           <article data-step="1" hidden>
             <h3><i>2</i>Key idea: the offset volume</h3>
             <svg class="ysvg" viewBox="-150 -125 300 245" role="img" aria-label="A non-manifold Y-shaped input, its alpha-offset volume and the medial axis of that volume">
-              <path d="M0 0 L0 -95 M0 0 L-82 47 M0 0 L82 47" fill="none" stroke="#4BA3DE" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M0 0 L0 -95 M0 0 L-82 47 M0 0 L82 47" fill="none" stroke="#ECECEF" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
-              <line x1="62" y1="36" x2="69" y2="24" stroke="#555" stroke-width="1.5"/>
-              <text x="72" y="22" font-size="17" font-style="italic" font-family="Georgia, serif" fill="#555">α</text>
-              <path d="M0 0 L0 -95 M0 0 L-82 47 M0 0 L82 47" fill="none" stroke="#17191e" stroke-width="2.5" stroke-linecap="round"/>
+              <g class="k1">
+                <path d="M0 0 L0 -95 M0 0 L-82 47 M0 0 L82 47" fill="none" stroke="#4BA3DE" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M0 0 L0 -95 M0 0 L-82 47 M0 0 L82 47" fill="none" stroke="#ECECEF" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+                <line x1="62" y1="36" x2="69" y2="24" stroke="#555" stroke-width="1.5"/>
+                <text x="72" y="22" font-size="17" font-style="italic" font-family="Georgia, serif" fill="#555">α</text>
+              </g>
+              <path class="axis" d="M0 0 L0 -95 M0 0 L-82 47 M0 0 L82 47" fill="none" stroke="#17191e" stroke-width="2.5" stroke-linecap="round"/>
             </svg>
-            <p>A non-manifold input has no inside/outside. But its <b>α-offset volume</b> {UDF ≤ α} is always a closed, manifold solid (the cyan line on the slice).</p>
-            <p>Its <b>medial axis</b> could recovers the topologies of the input if α is smaller than the weak feature size.</p>
+            <p>A non-manifold input has no inside/outside.</p>
+            <p class="k1">But its <b>α-offset volume</b> {UDF ≤ α} is always a closed, manifold solid (the cyan line on the slice).</p>
+            <p class="k2">Its <b>medial axis</b> could recovers the topologies of the input if α is smaller than the weak feature size.</p>
           </article>
           <article data-step="2" hidden>
             <h3><i>3</i>Sampling, without a grid</h3>

@@ -110,10 +110,10 @@ new ResizeObserver(() => {
 
 // ------------------------------------------------------------------ method: the 3D replay of the slides
 
-/** Each step plays the slide clicks of its scene list in turn (oaPipeline SCENES). */
-const STEPS: { key: PipelineStep, clicks: number, frames?: 'sampling2d' | 'optimization2d' }[] = [
+/** Each step plays the slide clicks of its scene list in turn (oaPipeline SCENES); hold overrides STILL_MS. */
+const STEPS: { key: PipelineStep, clicks: number, hold?: number, frames?: 'sampling2d' | 'optimization2d' }[] = [
   { key: 'udf', clicks: 3 },
-  { key: 'offset', clicks: 1 },
+  { key: 'offset', clicks: 3, hold: 2600 }, // one 3D scene; the clicks step the 2D sketch and text
   { key: 'sampling', clicks: 2, frames: 'sampling2d' },
   { key: 'init', clicks: 2 },
   { key: 'optimization', clicks: 2, frames: 'optimization2d' },
@@ -147,12 +147,18 @@ function selectStep(i: number) {
 function showClick(c: number) {
   clearTimeout(advance)
   click = c
-  if (!stage || !pipeline)
-    return
-  pipeline.pipelineClock.key = '' // replaying the same scene restarts it
-  stage.show(STEPS[current].key, c)
-  if (pipeline.pipelineClock.duration === 0 && c + 1 < STEPS[current].clicks)
-    advance = window.setTimeout(() => showClick(c + 1), STILL_MS)
+  const step = STEPS[current]
+  // the clicks also reveal the article's .k1 / .k2 parts, as on the slide
+  for (let k = 1; k < step.clicks; k++)
+    articles[current].classList.toggle(`at${k}`, k <= c)
+  if (stage && pipeline) {
+    pipeline.pipelineClock.key = '' // replaying the same scene restarts it
+    stage.show(step.key, c)
+    if (pipeline.pipelineClock.duration > 0)
+      return
+  }
+  if (c + 1 < step.clicks)
+    advance = window.setTimeout(() => showClick(c + 1), step.hold ?? STILL_MS)
 }
 
 stepButtons.forEach((b, i) => b.addEventListener('click', () => selectStep(i)))
