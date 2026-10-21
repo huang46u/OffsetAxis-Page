@@ -66,8 +66,9 @@ export interface OaSettings {
   spheres: { saturation: number, bright: number, contrast: number, ao: number, roughness: number, radiusScale: number } // medial_balls_material_controlled
   mesh: { color: Vec3, saturation: number, bright: number, contrast: number, roughness: number, wire: number, wireOpacity: number, wireWidth: number } // optimization_mesh_material_controlled; wireWidth: px
   samples: { color: Vec3, roughness: number, size: number } // offset_boundary_material; size: dot diameter (bunny units)
-  // the sampling step: the sheet outside the surface and the one inside, in two colours, with
-  // smaller dots (× sheetSize) so that the inner sheet shows between them
+  // the sampling step: the sheet outside the surface and the one inside, in two colours, as opaque
+  // matte beads (not tone mapped: the colours as given), smaller (× sheetSize) so that the inner
+  // sheet shows between them
   sheets: { outer: Vec3, inner: Vec3, sheetSize: number }
   rays: { color: Vec3, contact: Vec3 } // sampling_ray_material, sampling_contact_material (emission)
   seconds: { sweep: number, rays: number, diffusion: number, coverage: number, optimization: number, thinning: number, transition: number } // timeline lengths, step-to-step camera move
@@ -103,7 +104,7 @@ export const OA_DEFAULTS: OaSettings = {
   spheres: { saturation: 1.3, bright: 0, contrast: 1, ao: 0.5, roughness: 0.7, radiusScale: 1.5 },
   mesh: { color: [0.4078, 0.6588, 0.5686], saturation: 1.3, bright: 0, contrast: 1, roughness: 0.7, wire: 0.015, wireOpacity: 1, wireWidth: 1 },
   samples: { color: [0.32, 0.53, 0.73], roughness: 0.5, size: 0.0042 },
-  sheets: { outer: [0.04, 0.25, 0.6], inner: [0.75, 0.4, 0], sheetSize: 0.75 }, // deck blue, amber (darker: the shading lightens them)
+  sheets: { outer: [0.169, 0.471, 0.776], inner: [0.718, 0.475, 0.122], sheetSize: 1.6 }, // deck blue #2b78c6, amber #b7791f
   rays: { color: [0.08, 0.25, 0.35], contact: [1, 0.025, 0.005] },
   // the fast forward plays rays 1.5 s, diffusion 1 s, iterations 3.5 s: slower here, for the talk
   seconds: { sweep: 8, rays: 4.5, diffusion: 3, coverage: 6, optimization: 8, thinning: 3, transition: 1.5 },
@@ -342,6 +343,11 @@ class PipelineStage {
   nearPlane = new THREE.Plane()
   farClip = [this.farPlane]
   nearClip = [this.nearPlane]
+  // sampling step: a corner of the bunny is cut away, so that the two sample sheets show at the cut
+  cutPlane = new THREE.Plane()
+  cutPlane2 = new THREE.Plane()
+  cutClip = [this.cutPlane, this.cutPlane2] // clipIntersection: only the corner beyond both goes
+  cutTmp = { f: new THREE.Vector3(), r: new THREE.Vector3(), u: new THREE.Vector3() }
   clipTmp = { p: new THREE.Vector3(), n: new THREE.Vector3(), c: new THREE.Vector3(), q: new THREE.Quaternion() }
   slice: THREE.Mesh | null = null
   sliceUniforms: Record<string, THREE.IUniform> = {}
@@ -526,6 +532,7 @@ class PipelineStage {
   updateShellClip() {
     const { p, n, c, q } = this.clipTmp
     const on = this.cur.slice > 0.01
+    const cut = this.cur.sheets > 0.5
     if (on) {
       // slice plane in world space; the normal points to the camera side (sign s)
       this.slice!.getWorldPosition(p)
@@ -535,11 +542,28 @@ class PipelineStage {
       this.nearPlane.setFromNormalAndCoplanarPoint(n.multiplyScalar(s), p)
       this.farPlane.setFromNormalAndCoplanarPoint(n.multiplyScalar(-1), p)
     }
+    if (cut) {
+      // a corner cut through the bunny centre: the upper right of the view goes, its two faces
+      // turned toward the camera (CUT_TILT)
+      const cam = this.ps.camera
+      const { f, r, u } = this.cutTmp
+      cam.getWorldDirection(f)
+      cam.getWorldQuaternion(q)
+      u.set(0, 1, 0).applyQuaternion(q)
+      r.crossVectors(f, u).normalize() // right on the screen
+      const centre = this.ps.content.localToWorld(c.set(0.5, 0.5, 0.5)).addScaledVector(r, CUT_SHIFT[0]).addScaledVector(u, CUT_SHIFT[1])
+      const sin = Math.sin(CUT_TILT)
+      const cos = Math.cos(CUT_TILT)
+      this.cutPlane.setFromNormalAndCoplanarPoint(r.multiplyScalar(-cos).addScaledVector(f, sin).normalize(), centre)
+      this.cutPlane2.setFromNormalAndCoplanarPoint(u.multiplyScalar(-cos).addScaledVector(f, sin).normalize(), centre)
+    }
     // the program changes only when the plane count does (null <-> one plane)
     for (const m of this.shellMaterials) {
-      if (!!m.clippingPlanes !== on)
+      const planes = on ? this.nearClip : cut ? this.cutClip : null
+      if ((m.clippingPlanes?.length ?? 0) !== (planes?.length ?? 0))
         m.needsUpdate = true
-      m.clippingPlanes = on ? this.nearClip : null
+      m.clippingPlanes = planes
+      m.clipIntersection = !on && cut
     }
     this.shellFarMaterials.forEach((m, i) => {
       const orig = this.shellMaterials[i]
@@ -550,6 +574,19 @@ class PipelineStage {
       m.depthWrite = orig.depthWrite
       this.shellFar[i].visible = on && this.cur.shell > 0.01
     })
+    // the rays, their contacts and the samples are cut too
+    for (const mesh of [...this.arrows, ...(this.contacts ? [this.contacts] : [])]) {
+      const m = mesh.material as THREE.Material
+      if (!!m.clippingPlanes !== cut)
+        m.needsUpdate = true
+      m.clippingPlanes = cut ? this.cutClip : null
+      m.clipIntersection = cut
+    }
+    if (this.sampleUniforms.uCut) {
+      this.sampleUniforms.uCut.value.set(this.cutPlane.normal.x, this.cutPlane.normal.y, this.cutPlane.normal.z, this.cutPlane.constant)
+      this.sampleUniforms.uCut2.value.set(this.cutPlane2.normal.x, this.cutPlane2.normal.y, this.cutPlane2.normal.z, this.cutPlane2.constant)
+      this.sampleUniforms.uCutOn.value = cut ? 1 : 0
+    }
   }
 
   buildSamples(d: PipelineData) {
@@ -570,6 +607,9 @@ class PipelineStage {
       uOuter: { value: new THREE.Color() },
       uInner: { value: new THREE.Color() },
       uSheets: { value: 0 },
+      uCut: { value: new THREE.Vector4() }, // world plane (normal, constant): the kept side is >= 0
+      uCut2: { value: new THREE.Vector4() },
+      uCutOn: { value: 0 },
       uProgress: { value: 0 },
       uCover: { value: -1 }, // coverage time (-1: off)
       uOpacity: { value: 0 },
@@ -1135,6 +1175,12 @@ class PipelineStage {
     samples.visible = this.cur.samples > 0.01
     this.sampleUniforms.uOpacity.value = this.cur.samples
     this.sampleUniforms.uSheets.value = this.cur.sheets
+    const beads = this.cur.sheets > 0.5 // the bead colours are the palette colours, not tone mapped
+    const pm = samples.material as THREE.ShaderMaterial
+    if (pm.toneMapped === beads) {
+      pm.toneMapped = !beads
+      pm.needsUpdate = true
+    }
     this.sampleUniforms.uProgress.value = s.grow ? clock.progress * 1.02 : 1.02
     // coverage: kept while the samples fade out on the next step (they would come back otherwise)
     if (s.cover)
@@ -1427,6 +1473,8 @@ export function pipelineStage(): PipelineStage {
 
 const TET_ORANGE = new THREE.Color('#F07A3A') // tetrahedral cells, as in the paper figure
 const COVER_DELTA = 0.01 // dilation δ of the run (bunny units)
+const CUT_SHIFT = [0.04, -0.06] // sampling cut: its corner from the bunny centre, along the view right and up (world)
+const CUT_TILT = THREE.MathUtils.degToRad(15) // sampling cut: its faces turned toward the camera
 const RUN_ALPHA = 0.005 // α of the run (bunny units): the samples (samples.bin) lie on this level set
 // coverage timeline (0..1): the sphere of rank k (0..1, largest first) grows in from k × COVER_SPAN,
 // for COVER_GROW; its samples take its colour, then shrink away (POINTS_VERT)
@@ -1721,6 +1769,9 @@ uniform float uSize;
 uniform float uViewportHeight;
 uniform float uProgress;
 uniform float uCover;
+uniform vec4 uCut;
+uniform vec4 uCut2;
+uniform float uCutOn;
 attribute float aReveal;
 attribute float aCover;
 attribute vec3 aTint;
@@ -1741,6 +1792,10 @@ void main() {
   vTintOn = uCover < 0.0 ? 0.0 : smoothstep(at, at + 0.02, uCover);
   if (uCover >= 0.0)
     vShow *= 1.0 - smoothstep(at + 0.12, at + 0.22, uCover);
+  // sampling step: the corner beyond both cut planes is cut away
+  vec3 wp = (modelMatrix * vec4(position, 1.0)).xyz;
+  if (uCutOn > 0.5 && dot(uCut.xyz, wp) + uCut.w < 0.0 && dot(uCut2.xyz, wp) + uCut2.w < 0.0)
+    vShow = 0.0;
   gl_PointSize = vShow * uSize * scale * projectionMatrix[1][1] * uViewportHeight * 0.5 / -mv.z;
 }`
 
@@ -1766,7 +1821,10 @@ void main() {
   for (int i = 0; i < 3; i++)
     e += uLightE[i] * max(dot(n, uLightDir[i]), 0.0);
   vec3 base = mix(uColor, mix(uOuter, uInner, vSide), uSheets);
-  gl_FragColor = vec4(mix(base, vTint, vTintOn) / 3.14159265 * e, uOpacity);
+  vec3 lit = mix(base, vTint, vTintOn) / 3.14159265 * e;
+  // sampling step: an opaque matte bead, lit by the key light, darker toward its rim
+  float bead = (0.5 + 0.5 * max(dot(n, uLightDir[0]), 0.0)) * (0.75 + 0.25 * n.z);
+  gl_FragColor = vec4(mix(lit, base * bead, uSheets), uOpacity);
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
 }`
