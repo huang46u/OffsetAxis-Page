@@ -55,8 +55,8 @@ export interface StepView {
 /** OffsetAxis settings that a BlenderLook has no place for (saved as `oa` in looks/oa-pipeline.json). */
 export interface OaSettings {
   views: Record<PipelineStep, StepView>
-  // α drawn (bunny units, illustrative: the α of the run, 0.005, is too thin to see): the α line
-  // of the slice and the ray contacts (where the UDF = α along the rays)
+  // α drawn on the slice (bunny units, illustrative: the α of the run, 0.005, is too thin to see);
+  // the ray contacts use RUN_ALPHA, so that they lie on the samples
   alpha: number
   fill: { rotation: Vec3, strength: number } // studio_fill
   rim: { rotation: Vec3, strength: number } // studio_rim
@@ -347,7 +347,7 @@ class PipelineStage {
   arrows: THREE.InstancedMesh[] = [] // shafts, heads
   contacts: THREE.InstancedMesh | null = null
   rayPaths: RayPath[] = []
-  contactsAlpha = -1
+  contactsDone = false
   spheres: THREE.InstancedMesh | null = null
   sphereUniforms: Record<string, THREE.IUniform> = {}
   sphereTexture: THREE.DataTexture | null = null // x, y, z, r (shown) per sphere, for the AO
@@ -708,7 +708,8 @@ class PipelineStage {
   computeContacts() {
     const d = this.data!
     const sm = d.manifest.sampling
-    const alpha = this.contactsAlpha = this.settings.alpha
+    const alpha = RUN_ALPHA
+    this.contactsDone = true
     const step = 0.0015
     const reach = sm.extent * sm.travelRatio
     const p = new THREE.Vector3()
@@ -943,7 +944,7 @@ class PipelineStage {
     lin(rays.color, (this.arrows[0].material as THREE.MeshBasicMaterial).color)
     lin(rays.contact, (this.contacts!.material as THREE.MeshBasicMaterial).color)
     this.sliceUniforms.uAlpha.value = settings.alpha
-    if (settings.alpha !== this.contactsAlpha)
+    if (!this.contactsDone)
       this.computeContacts()
     this.shownIteration = -1 // sphere radii follow radiusScale
     if (this.spec.duration)
@@ -1412,6 +1413,7 @@ export function pipelineStage(): PipelineStage {
 
 const TET_ORANGE = new THREE.Color('#F07A3A') // tetrahedral cells, as in the paper figure
 const COVER_DELTA = 0.01 // dilation δ of the run (bunny units)
+const RUN_ALPHA = 0.005 // α of the run (bunny units): the samples (samples.bin) lie on this level set
 // coverage timeline (0..1): the sphere of rank k (0..1, largest first) grows in from k × COVER_SPAN,
 // for COVER_GROW; its samples take its colour, then shrink away (POINTS_VERT)
 const COVER_SPAN = 0.75
