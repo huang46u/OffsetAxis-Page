@@ -66,7 +66,10 @@ export interface OaSettings {
   spheres: { saturation: number, bright: number, contrast: number, ao: number, roughness: number, radiusScale: number } // medial_balls_material_controlled
   mesh: { color: Vec3, saturation: number, bright: number, contrast: number, roughness: number, wire: number, wireOpacity: number, wireWidth: number } // optimization_mesh_material_controlled; wireWidth: px
   samples: { color: Vec3, roughness: number, size: number } // offset_boundary_material; size: dot diameter (bunny units)
-  sheets: { outer: Vec3, inner: Vec3, thickness: number } // inset of the sampling step: sheet colours, slab thickness (bunny units)
+  sheets: { outer: Vec3, inner: Vec3, thickness: number } // sampling step: sheet colours (outer: also the balls), inset slab thickness (bunny units)
+  // the sampling step: the samples thinned to a Poisson disk subset (min spacing, bunny units),
+  // drawn as larger balls (× size) with the AO of the medial balls (strength ao)
+  balls: { spacing: number, size: number, ao: number }
   rays: { color: Vec3, contact: Vec3 } // sampling_ray_material, sampling_contact_material (emission)
   seconds: { sweep: number, rays: number, diffusion: number, coverage: number, optimization: number, thinning: number, transition: number } // timeline lengths, step-to-step camera move
 }
@@ -103,6 +106,7 @@ export const OA_DEFAULTS: OaSettings = {
   mesh: { color: [0.4078, 0.6588, 0.5686], saturation: 1.3, bright: 0, contrast: 1, roughness: 0.7, wire: 0.015, wireOpacity: 1, wireWidth: 1 },
   samples: { color: [0.32, 0.53, 0.73], roughness: 0.5, size: 0.0042 },
   sheets: { outer: [0.32, 0.53, 0.73], inner: [0.1, 0.22, 0.4], thickness: 0.025 }, // the sample blue, a darker one
+  balls: { spacing: 0.024, size: 5.5, ao: 1 },
   rays: { color: [0.08, 0.25, 0.35], contact: [1, 0.025, 0.005] },
   // the fast forward plays rays 1.5 s, diffusion 1 s, iterations 3.5 s: slower here, for the talk
   seconds: { sweep: 8, rays: 4.5, diffusion: 3, coverage: 6, optimization: 8, thinning: 3, transition: 1.5 },
@@ -229,6 +233,7 @@ interface SceneSpec {
   // the inset is a cross-section over the top right of the main view (which keeps its size): a
   // slab of samples across the surface, seen edge-on, the outer sheet above the inner one
   slab?: boolean
+  balls?: boolean // samples as balls (OaSettings.balls)
   cover?: boolean // the greedy coverage plays: spheres appear largest first, the samples they cover go
   connect?: number // connectivity before the thinning (tetrahedra in orange)
   thin?: boolean // the thinning plays: the faces it removes fade out, the tetrahedra are gone
@@ -253,7 +258,7 @@ export const SCENES: Record<PipelineStep, SceneSpec[]> = {
   ],
   sampling: [
     { ...S0, rays: true, duration: 'rays' },
-    { ...S0, samples: 1, grow: true, inset: true, slab: true, duration: 'diffusion' },
+    { ...S0, samples: 1, grow: true, inset: true, slab: true, balls: true, duration: 'diffusion' },
   ],
   init: [
     // the samples (each has a candidate sphere), then the greedy coverage, seen in a large inset
@@ -315,7 +320,7 @@ class PipelineStage {
   step: PipelineStep = 'udf'
   click = 0
   spec: SceneSpec = S0
-  cur = { shell: 1, solid: 0, tint: 0, slice: 0, alphaLine: 0, samples: 0, spheres: 0, mesh: 0, rays: 0, connect: 0 }
+  cur = { shell: 1, solid: 0, tint: 0, slice: 0, alphaLine: 0, samples: 0, spheres: 0, mesh: 0, rays: 0, connect: 0, balls: 0 }
   last = 0
 
   // step views: the pose shown, and the move between two steps
@@ -569,6 +574,15 @@ class PipelineStage {
     geo.setAttribute('aCover', new THREE.BufferAttribute(new Float32Array(n), 1)) // computeCoverage
     geo.setAttribute('aTint', new THREE.BufferAttribute(new Float32Array(3 * n), 3))
     geo.setAttribute('aSide', new THREE.BufferAttribute(sampleSides(d), 1))
+    const keep = poissonKeep(pos, this.settings.balls.spacing) // the balls: kept if 0
+    geo.setAttribute('aKeep', new THREE.BufferAttribute(keep, 1))
+    const centres = new THREE.DataTexture(new Float32Array(256 * Math.ceil(n / 256) * 4), 256, Math.ceil(n / 256), THREE.RGBAFormat, THREE.FloatType)
+    for (let i = 0; i < n; i++)
+      (centres.image.data as Float32Array).set(pos.subarray(3 * i, 3 * i + 3), 4 * i)
+    centres.needsUpdate = true
+    const neighbors = sampleNeighbors(pos, keep, 0.5, this.settings.samples.size * this.settings.balls.size / 2)
+    const nTexture = new THREE.DataTexture(neighbors, 256, neighbors.length / 4 / 256, THREE.RGBAFormat, THREE.FloatType)
+    nTexture.needsUpdate = true
     this.sampleUniforms = {
       uSize: { value: 0 },
       uViewportHeight: { value: 500 },
@@ -577,6 +591,12 @@ class PipelineStage {
       uInner: { value: new THREE.Color() },
       uSlab: { value: new THREE.Vector4() }, // slab inset: its mid plane (normal, constant), world
       uSlabHalf: { value: -1 }, // its half thickness (world); < 0: off (the main view)
+      uBalls: { value: 0 }, // the sampling step: kept samples only, AO
+      uKeep: { value: 0.5 }, // aKeep: 0 kept, 1 not
+      uAo: { value: 0 },
+      uCentres: { value: centres }, // sample centres (bunny units)
+      uNeighbors: { value: nTexture }, // sampleNeighbors
+      uMV: { value: new THREE.Matrix4() }, // model-view of the draw (the main view or the inset)
       uProgress: { value: 0 },
       uCover: { value: -1 }, // coverage time (-1: off)
       uOpacity: { value: 0 },
@@ -586,6 +606,7 @@ class PipelineStage {
     }
     const material = new THREE.ShaderMaterial({ uniforms: this.sampleUniforms, vertexShader: POINTS_VERT, fragmentShader: POINTS_FRAG, transparent: true })
     this.samples = new THREE.Points(geo, material)
+    this.samples.onBeforeRender = (_r, _s, cam) => this.sampleUniforms.uMV.value.multiplyMatrices(cam.matrixWorldInverse, this.samples!.matrixWorld)
     this.samples.frustumCulled = false
     ps.content.add(this.samples)
 
@@ -958,6 +979,7 @@ class PipelineStage {
     lin(samples.color, this.sampleUniforms.uColor.value)
     lin(settings.sheets.outer, this.sampleUniforms.uOuter.value)
     lin(settings.sheets.inner, this.sampleUniforms.uInner.value)
+    this.sampleUniforms.uAo.value = settings.balls.ao
     this.sampleUniforms.uSize.value = samples.size
     lin(rays.color, (this.arrows[0].material as THREE.MeshBasicMaterial).color)
     lin(rays.contact, (this.contacts!.material as THREE.MeshBasicMaterial).color)
@@ -1036,7 +1058,7 @@ class PipelineStage {
   apply(instant: boolean) {
     if (instant) {
       const s = this.spec
-      Object.assign(this.cur, { shell: s.shell, solid: s.solid ?? 0, tint: s.tint ?? 0, slice: s.slice, alphaLine: s.alphaLine, samples: s.samples && !s.grow ? 1 : 0, spheres: s.spheres, mesh: s.mesh, rays: s.rays ? 1 : 0, connect: s.connect ?? 0 })
+      Object.assign(this.cur, { shell: s.shell, solid: s.solid ?? 0, tint: s.tint ?? 0, slice: s.slice, alphaLine: s.alphaLine, samples: s.samples && !s.grow ? 1 : 0, spheres: s.spheres, mesh: s.mesh, rays: s.rays ? 1 : 0, connect: s.connect ?? 0, balls: s.balls ? 1 : 0 })
     }
   }
 
@@ -1074,6 +1096,7 @@ class PipelineStage {
     ease('spheres', s.spheres)
     ease('mesh', s.mesh)
     ease('rays', s.rays || s.grow ? 1 : 0)
+    ease('balls', s.balls ? 1 : 0)
     // move between two step views (eased)
     if (this.move) {
       const { from, to, t0 } = this.move
@@ -1140,6 +1163,7 @@ class PipelineStage {
     const samples = this.samples!
     samples.visible = this.cur.samples > 0.01
     this.sampleUniforms.uOpacity.value = this.cur.samples
+    this.sampleUniforms.uBalls.value = this.cur.balls
     this.sampleUniforms.uProgress.value = s.grow ? clock.progress * 1.02 : 1.02
     // coverage: kept while the samples fade out on the next step (they would come back otherwise)
     if (s.cover)
@@ -1425,7 +1449,10 @@ class PipelineStage {
       if (this.sampleUniforms.uViewportHeight) {
         // dot size in this view; smaller in the inset (individual samples, both sheets)
         this.sampleUniforms.uViewportHeight.value = vh * renderer.getPixelRatio()
-        this.sampleUniforms.uSize.value = this.settings.samples.size * (cam === this.insetCamera ? INSET_DOT : 1)
+        // the balls of the sampling step: larger in the main view (the inset keeps its dots: the two
+        // sheets are only 2α apart)
+        const balls = cam === this.insetCamera ? 1 : THREE.MathUtils.lerp(1, this.settings.balls.size, this.cur.balls)
+        this.sampleUniforms.uSize.value = this.settings.samples.size * (cam === this.insetCamera ? INSET_DOT : 1) * balls
       }
       // wire widths are in pixels of the view drawn
       for (const w of [this.wire, ...this.connectWires])
@@ -1505,6 +1532,7 @@ const RUN_ALPHA = 0.005 // α of the run (bunny units): the samples (samples.bin
 const COVER_SPAN = 0.75
 const COVER_GROW = 0.04
 const INSET_DOT = 0.5 // sample dots in the inset, × their size
+const SAMPLE_AO_NEIGHBORS = 8 // kept samples that darken each ball (sampling step)
 
 /** Blender Hue/Saturation/Value (hue 0.5: unchanged) then Bright/Contrast, on linear RGB. */
 function ffColor(c: Vec3, saturation: number, bright: number, contrast: number): Vec3 {
@@ -1724,6 +1752,88 @@ vec3 sliceColor() {
   return mix(col, uAlphaColor, uAlphaOn * (1.0 - smoothstep(1.0 * apx, 2.5 * apx, ad)));
 }`
 
+/** Poisson disk subset of the samples (random order, greedy): 0 if kept, 1 if not. */
+function poissonKeep(pos: Float32Array, spacing: number): Float32Array {
+  const n = pos.length / 3
+  const keep = new Float32Array(n).fill(1)
+  const order = Array.from({ length: n }, (_, i) => i)
+  for (let i = n - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[order[i], order[j]] = [order[j], order[i]]
+  }
+  const cell = (v: number) => Math.floor(v / spacing)
+  const cells = new Map<string, number[]>()
+  for (const i of order) {
+    const x = pos[3 * i]
+    const y = pos[3 * i + 1]
+    const z = pos[3 * i + 2]
+    let free = true
+    for (let a = -1; a <= 1 && free; a++) {
+      for (let b = -1; b <= 1 && free; b++) {
+        for (let c = -1; c <= 1 && free; c++) {
+          for (const j of cells.get(`${cell(x) + a},${cell(y) + b},${cell(z) + c}`) ?? []) {
+            if (Math.hypot(pos[3 * j] - x, pos[3 * j + 1] - y, pos[3 * j + 2] - z) < spacing) {
+              free = false
+              break
+            }
+          }
+        }
+      }
+    }
+    if (!free)
+      continue
+    keep[i] = 0
+    const k = `${cell(x)},${cell(y)},${cell(z)}`
+    if (!cells.has(k))
+      cells.set(k, [])
+    cells.get(k)!.push(i)
+  }
+  return keep
+}
+
+/**
+ * The nearest kept samples of each kept sample (the balls of the sampling step), for their AO:
+ * SAMPLE_AO_NEIGHBORS indices per sample (-1: none), within 4 ball radii (bunny units).
+ */
+function sampleNeighbors(pos: Float32Array, keep: Float32Array, share: number, radius: number): Float32Array {
+  const n = keep.length
+  const k = SAMPLE_AO_NEIGHBORS
+  const reach = 4 * radius
+  const cell = (v: number) => Math.floor(v / reach)
+  const cells = new Map<string, number[]>()
+  for (let i = 0; i < n; i++) {
+    if (keep[i] > share)
+      continue
+    const c = `${cell(pos[3 * i])},${cell(pos[3 * i + 1])},${cell(pos[3 * i + 2])}`
+    if (!cells.has(c))
+      cells.set(c, [])
+    cells.get(c)!.push(i)
+  }
+  const out = new Float32Array(Math.ceil(n * k / 4 / 256) * 256 * 4).fill(-1)
+  for (let i = 0; i < n; i++) {
+    if (keep[i] > share)
+      continue
+    const x = pos[3 * i]
+    const y = pos[3 * i + 1]
+    const z = pos[3 * i + 2]
+    const near: [number, number][] = []
+    for (let a = -1; a <= 1; a++) {
+      for (let b = -1; b <= 1; b++) {
+        for (let c = -1; c <= 1; c++) {
+          for (const j of cells.get(`${cell(x) + a},${cell(y) + b},${cell(z) + c}`) ?? []) {
+            const d = Math.hypot(pos[3 * j] - x, pos[3 * j + 1] - y, pos[3 * j + 2] - z)
+            if (j !== i && d < reach)
+              near.push([d, j])
+          }
+        }
+      }
+    }
+    near.sort((p, q) => p[0] - q[0])
+    near.slice(0, k).forEach(([, j], m) => out[i * k + m] = j)
+  }
+  return out
+}
+
 /** Normal of the bunny at a vertex: the area-weighted normals of its faces (bunny units). */
 function vertexNormal(d: PipelineData, v: number): THREE.Vector3 {
   const V = d.bunnyPos
@@ -1812,15 +1922,23 @@ attribute float aReveal;
 attribute float aCover;
 attribute vec3 aTint;
 attribute float aSide;
+attribute float aKeep;
 uniform vec4 uSlab;
 uniform float uSlabHalf;
+uniform float uBalls;
+uniform float uKeep;
 varying float vShow;
+varying vec3 vCentre;
+varying float vRadius;
+flat varying int vIndex;
 varying vec3 vTint;
 varying float vTintOn;
 varying float vSide;
 void main() {
   vSide = aSide;
+  vIndex = gl_VertexID;
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  vCentre = mv.xyz;
   gl_Position = projectionMatrix * mv;
   float scale = length(modelMatrix[0].xyz);
   vShow = 1.0 - smoothstep(uProgress - 0.04, uProgress, aReveal);
@@ -1833,6 +1951,10 @@ void main() {
   // slab inset: only the samples in the slab
   if (uSlabHalf >= 0.0 && abs(dot(uSlab.xyz, (modelMatrix * vec4(position, 1.0)).xyz) + uSlab.w) > uSlabHalf)
     vShow = 0.0;
+  // the balls of the sampling step: a share of the samples in the main view
+  if (uBalls > 0.5 && uSlabHalf < 0.0 && aKeep > uKeep)
+    vShow = 0.0;
+  vRadius = 0.5 * uSize * scale;
   gl_PointSize = vShow * uSize * scale * projectionMatrix[1][1] * uViewportHeight * 0.5 / -mv.z;
 }`
 
@@ -1841,6 +1963,11 @@ uniform vec3 uColor;
 uniform vec3 uOuter;
 uniform vec3 uInner;
 uniform float uSlabHalf;
+uniform float uBalls;
+uniform float uAo;
+uniform highp sampler2D uCentres;
+uniform highp sampler2D uNeighbors;
+uniform mat4 uMV;
 uniform float uOpacity;
 uniform vec3 uLightDir[3];
 uniform float uLightE[3];
@@ -1849,6 +1976,9 @@ varying float vShow;
 varying vec3 vTint;
 varying float vTintOn;
 varying float vSide;
+varying vec3 vCentre;
+varying float vRadius;
+flat varying int vIndex;
 void main() {
   vec2 p = gl_PointCoord * 2.0 - 1.0;
   float r2 = dot(p, p);
@@ -1857,8 +1987,28 @@ void main() {
   float e = uAmbient * 3.14159265;
   for (int i = 0; i < 3; i++)
     e += uLightE[i] * max(dot(n, uLightDir[i]), 0.0);
-  vec3 base = uSlabHalf >= 0.0 ? mix(uOuter, uInner, vSide) : uColor; // slab inset: the two sheets
-  gl_FragColor = vec4(mix(base, vTint, vTintOn) / 3.14159265 * e, uOpacity);
+  // slab inset: the two sheets; the balls of the main view: the outer sheet colour
+  vec3 base = uSlabHalf >= 0.0 ? mix(uOuter, uInner, vSide) : mix(uColor, uOuter, uBalls);
+  // balls: the AO of the medial balls, (n · v) (r / d)² over the nearest kept samples (view space)
+  float ao = 1.0;
+  if (uBalls > 0.0) {
+    vec3 fp = vCentre + vRadius * n;
+    float occlusion = 0.0;
+    for (int t = 0; t < ${SAMPLE_AO_NEIGHBORS / 4}; t++) {
+      int texel = vIndex * ${SAMPLE_AO_NEIGHBORS / 4} + t;
+      vec4 ids = texelFetch(uNeighbors, ivec2(texel % 256, texel / 256), 0);
+      for (int c = 0; c < 4; c++) {
+        if (ids[c] < 0.0)
+          continue;
+        int j = int(ids[c]);
+        vec3 v = (uMV * vec4(texelFetch(uCentres, ivec2(j % 256, j / 256), 0).xyz, 1.0)).xyz - fp;
+        float d = max(length(v), 1e-5);
+        occlusion += max(dot(n, v / d), 0.0) * min(1.0, vRadius * vRadius / (d * d));
+      }
+    }
+    ao = mix(1.0, clamp(1.0 - occlusion, 0.0, 1.0), uAo * uBalls);
+  }
+  gl_FragColor = vec4(mix(base, vTint, vTintOn) / 3.14159265 * e * ao, uOpacity);
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
 }`
