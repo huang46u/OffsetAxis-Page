@@ -105,8 +105,8 @@ export const OA_DEFAULTS: OaSettings = {
   spheres: { saturation: 1.3, bright: 0, contrast: 1, ao: 0.5, roughness: 0.7, radiusScale: 1.5 },
   mesh: { color: [0.4078, 0.6588, 0.5686], saturation: 1.3, bright: 0, contrast: 1, roughness: 0.7, wire: 0.015, wireOpacity: 1, wireWidth: 1 },
   samples: { color: [0.32, 0.53, 0.73], roughness: 0.5, size: 0.0042 },
-  sheets: { outer: [0.32, 0.53, 0.73], inner: [0.1, 0.22, 0.4], thickness: 0.025 }, // the sample blue, a darker one
-  balls: { spacing: 0.024, size: 5.5, ao: 1 },
+  sheets: { outer: [0.169, 0.471, 0.776], inner: [0.06, 0.18, 0.38], thickness: 0.05 }, // deck blue #2b78c6, a darker one
+  balls: { spacing: 0.014, size: 3, ao: 1 }, // smaller than the medial balls of the next step
   rays: { color: [0.08, 0.25, 0.35], contact: [1, 0.025, 0.005] },
   // the fast forward plays rays 1.5 s, diffusion 1 s, iterations 3.5 s: slower here, for the talk
   seconds: { sweep: 8, rays: 4.5, diffusion: 3, coverage: 6, optimization: 8, thinning: 3, transition: 1.5 },
