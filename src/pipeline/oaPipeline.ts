@@ -66,10 +66,7 @@ export interface OaSettings {
   spheres: { saturation: number, bright: number, contrast: number, ao: number, roughness: number, radiusScale: number } // medial_balls_material_controlled
   mesh: { color: Vec3, saturation: number, bright: number, contrast: number, roughness: number, wire: number, wireOpacity: number, wireWidth: number } // optimization_mesh_material_controlled; wireWidth: px
   samples: { color: Vec3, roughness: number, size: number } // offset_boundary_material; size: dot diameter (bunny units)
-  // the sampling step: the sheet outside the surface and the one inside, in two colours, as opaque
-  // matte beads (not tone mapped: the colours as given), smaller (× sheetSize) so that the inner
-  // sheet shows between them
-  sheets: { outer: Vec3, inner: Vec3, sheetSize: number }
+  sheets: { outer: Vec3, inner: Vec3, thickness: number } // inset of the sampling step: sheet colours, slab thickness (bunny units)
   rays: { color: Vec3, contact: Vec3 } // sampling_ray_material, sampling_contact_material (emission)
   seconds: { sweep: number, rays: number, diffusion: number, coverage: number, optimization: number, thinning: number, transition: number } // timeline lengths, step-to-step camera move
 }
@@ -89,7 +86,8 @@ export const OA_DEFAULTS: OaSettings = {
   views: {
     udf: figureView(),
     offset: figureView(),
-    sampling: figureView(),
+    // the two sheets in an inset, on the back (the region of the init step)
+    sampling: figureView(1, { focus: [0.461, 0.53, 0.743], size: 0.035 }),
     // on the back: large and small spheres, the two sample sheets around them
     init: figureView(1, { focus: [0.461, 0.53, 0.743], size: 0.1 }),
     // on the back (sphere 6255): lit, facing the camera, the spheres move about twice the median
@@ -104,7 +102,7 @@ export const OA_DEFAULTS: OaSettings = {
   spheres: { saturation: 1.3, bright: 0, contrast: 1, ao: 0.5, roughness: 0.7, radiusScale: 1.5 },
   mesh: { color: [0.4078, 0.6588, 0.5686], saturation: 1.3, bright: 0, contrast: 1, roughness: 0.7, wire: 0.015, wireOpacity: 1, wireWidth: 1 },
   samples: { color: [0.32, 0.53, 0.73], roughness: 0.5, size: 0.0042 },
-  sheets: { outer: [0.169, 0.471, 0.776], inner: [0.718, 0.475, 0.122], sheetSize: 1.6 }, // deck blue #2b78c6, amber #b7791f
+  sheets: { outer: [0.32, 0.53, 0.73], inner: [0.1, 0.22, 0.4], thickness: 0.025 }, // the sample blue, a darker one
   rays: { color: [0.08, 0.25, 0.35], contact: [1, 0.025, 0.005] },
   // the fast forward plays rays 1.5 s, diffusion 1 s, iterations 3.5 s: slower here, for the talk
   seconds: { sweep: 8, rays: 4.5, diffusion: 3, coverage: 6, optimization: 8, thinning: 3, transition: 1.5 },
@@ -222,13 +220,15 @@ interface SceneSpec {
   rays?: boolean // sampling rays play (the timeline = the ray part of the fast forward schedule)
   samples: number // 0: hidden, 1: all shown; with `grow`, spread from the ray contacts
   grow?: boolean
-  sheets?: boolean // the two sample sheets in two colours (OaSettings.sheets)
   spheres: number
   mesh: number
   optimize?: boolean // spheres and mesh play the iterations
   split: boolean // spheres | mesh side by side
   inset?: boolean // zoomed inset of the region of the step view
   bigInset?: boolean // the inset fills the height of the view (no split), next to the main view
+  // the inset is a cross-section over the top right of the main view (which keeps its size): a
+  // slab of samples across the surface, seen edge-on, the outer sheet above the inner one
+  slab?: boolean
   cover?: boolean // the greedy coverage plays: spheres appear largest first, the samples they cover go
   connect?: number // connectivity before the thinning (tetrahedra in orange)
   thin?: boolean // the thinning plays: the faces it removes fade out, the tetrahedra are gone
@@ -253,7 +253,7 @@ export const SCENES: Record<PipelineStep, SceneSpec[]> = {
   ],
   sampling: [
     { ...S0, rays: true, duration: 'rays' },
-    { ...S0, samples: 1, grow: true, sheets: true, duration: 'diffusion' },
+    { ...S0, samples: 1, grow: true, inset: true, slab: true, duration: 'diffusion' },
   ],
   init: [
     // the samples (each has a candidate sphere), then the greedy coverage, seen in a large inset
@@ -315,7 +315,7 @@ class PipelineStage {
   step: PipelineStep = 'udf'
   click = 0
   spec: SceneSpec = S0
-  cur = { shell: 1, solid: 0, tint: 0, slice: 0, alphaLine: 0, samples: 0, spheres: 0, mesh: 0, rays: 0, connect: 0, sheets: 0 }
+  cur = { shell: 1, solid: 0, tint: 0, slice: 0, alphaLine: 0, samples: 0, spheres: 0, mesh: 0, rays: 0, connect: 0 }
   last = 0
 
   // step views: the pose shown, and the move between two steps
@@ -343,11 +343,6 @@ class PipelineStage {
   nearPlane = new THREE.Plane()
   farClip = [this.farPlane]
   nearClip = [this.nearPlane]
-  // sampling step: a corner of the bunny is cut away, so that the two sample sheets show at the cut
-  cutPlane = new THREE.Plane()
-  cutPlane2 = new THREE.Plane()
-  cutClip = [this.cutPlane, this.cutPlane2] // clipIntersection: only the corner beyond both goes
-  cutTmp = { f: new THREE.Vector3(), r: new THREE.Vector3(), u: new THREE.Vector3() }
   clipTmp = { p: new THREE.Vector3(), n: new THREE.Vector3(), c: new THREE.Vector3(), q: new THREE.Quaternion() }
   slice: THREE.Mesh | null = null
   sliceUniforms: Record<string, THREE.IUniform> = {}
@@ -380,6 +375,11 @@ class PipelineStage {
   focus = new THREE.Vector3()
   insetCamera = new THREE.PerspectiveCamera(10, 1, 0.001, 100)
   insetEye = new THREE.Vector3()
+  // slab inset: the two planes that keep the slab (world), its half thickness (world), the surface
+  // normal at the focus (bunny units) and the vertex it was taken at
+  slabPlanes = [new THREE.Plane(), new THREE.Plane()]
+  slabHalf = 0
+  slabNormal = { vertex: -1, normal: new THREE.Vector3() }
   panels: Panel[] = []
   frames: HTMLDivElement[] = []
   picking: ((focus: Vec3) => void) | null = null
@@ -532,7 +532,6 @@ class PipelineStage {
   updateShellClip() {
     const { p, n, c, q } = this.clipTmp
     const on = this.cur.slice > 0.01
-    const cut = this.cur.sheets > 0.5
     if (on) {
       // slice plane in world space; the normal points to the camera side (sign s)
       this.slice!.getWorldPosition(p)
@@ -542,28 +541,11 @@ class PipelineStage {
       this.nearPlane.setFromNormalAndCoplanarPoint(n.multiplyScalar(s), p)
       this.farPlane.setFromNormalAndCoplanarPoint(n.multiplyScalar(-1), p)
     }
-    if (cut) {
-      // a corner cut through the bunny centre: the upper right of the view goes, its two faces
-      // turned toward the camera (CUT_TILT)
-      const cam = this.ps.camera
-      const { f, r, u } = this.cutTmp
-      cam.getWorldDirection(f)
-      cam.getWorldQuaternion(q)
-      u.set(0, 1, 0).applyQuaternion(q)
-      r.crossVectors(f, u).normalize() // right on the screen
-      const centre = this.ps.content.localToWorld(c.set(0.5, 0.5, 0.5)).addScaledVector(r, CUT_SHIFT[0]).addScaledVector(u, CUT_SHIFT[1])
-      const sin = Math.sin(CUT_TILT)
-      const cos = Math.cos(CUT_TILT)
-      this.cutPlane.setFromNormalAndCoplanarPoint(r.multiplyScalar(-cos).addScaledVector(f, sin).normalize(), centre)
-      this.cutPlane2.setFromNormalAndCoplanarPoint(u.multiplyScalar(-cos).addScaledVector(f, sin).normalize(), centre)
-    }
     // the program changes only when the plane count does (null <-> one plane)
     for (const m of this.shellMaterials) {
-      const planes = on ? this.nearClip : cut ? this.cutClip : null
-      if ((m.clippingPlanes?.length ?? 0) !== (planes?.length ?? 0))
+      if (!!m.clippingPlanes !== on)
         m.needsUpdate = true
-      m.clippingPlanes = planes
-      m.clipIntersection = !on && cut
+      m.clippingPlanes = on ? this.nearClip : null
     }
     this.shellFarMaterials.forEach((m, i) => {
       const orig = this.shellMaterials[i]
@@ -574,19 +556,6 @@ class PipelineStage {
       m.depthWrite = orig.depthWrite
       this.shellFar[i].visible = on && this.cur.shell > 0.01
     })
-    // the rays, their contacts and the samples are cut too
-    for (const mesh of [...this.arrows, ...(this.contacts ? [this.contacts] : [])]) {
-      const m = mesh.material as THREE.Material
-      if (!!m.clippingPlanes !== cut)
-        m.needsUpdate = true
-      m.clippingPlanes = cut ? this.cutClip : null
-      m.clipIntersection = cut
-    }
-    if (this.sampleUniforms.uCut) {
-      this.sampleUniforms.uCut.value.set(this.cutPlane.normal.x, this.cutPlane.normal.y, this.cutPlane.normal.z, this.cutPlane.constant)
-      this.sampleUniforms.uCut2.value.set(this.cutPlane2.normal.x, this.cutPlane2.normal.y, this.cutPlane2.normal.z, this.cutPlane2.constant)
-      this.sampleUniforms.uCutOn.value = cut ? 1 : 0
-    }
   }
 
   buildSamples(d: PipelineData) {
@@ -606,10 +575,8 @@ class PipelineStage {
       uColor: { value: new THREE.Color() },
       uOuter: { value: new THREE.Color() },
       uInner: { value: new THREE.Color() },
-      uSheets: { value: 0 },
-      uCut: { value: new THREE.Vector4() }, // world plane (normal, constant): the kept side is >= 0
-      uCut2: { value: new THREE.Vector4() },
-      uCutOn: { value: 0 },
+      uSlab: { value: new THREE.Vector4() }, // slab inset: its mid plane (normal, constant), world
+      uSlabHalf: { value: -1 }, // its half thickness (world); < 0: off (the main view)
       uProgress: { value: 0 },
       uCover: { value: -1 }, // coverage time (-1: off)
       uOpacity: { value: 0 },
@@ -1069,7 +1036,7 @@ class PipelineStage {
   apply(instant: boolean) {
     if (instant) {
       const s = this.spec
-      Object.assign(this.cur, { shell: s.shell, solid: s.solid ?? 0, tint: s.tint ?? 0, slice: s.slice, alphaLine: s.alphaLine, samples: s.samples && !s.grow ? 1 : 0, spheres: s.spheres, mesh: s.mesh, rays: s.rays ? 1 : 0, connect: s.connect ?? 0, sheets: s.sheets ? 1 : 0 })
+      Object.assign(this.cur, { shell: s.shell, solid: s.solid ?? 0, tint: s.tint ?? 0, slice: s.slice, alphaLine: s.alphaLine, samples: s.samples && !s.grow ? 1 : 0, spheres: s.spheres, mesh: s.mesh, rays: s.rays ? 1 : 0, connect: s.connect ?? 0 })
     }
   }
 
@@ -1107,7 +1074,6 @@ class PipelineStage {
     ease('spheres', s.spheres)
     ease('mesh', s.mesh)
     ease('rays', s.rays || s.grow ? 1 : 0)
-    ease('sheets', s.sheets ? 1 : 0)
     // move between two step views (eased)
     if (this.move) {
       const { from, to, t0 } = this.move
@@ -1174,13 +1140,6 @@ class PipelineStage {
     const samples = this.samples!
     samples.visible = this.cur.samples > 0.01
     this.sampleUniforms.uOpacity.value = this.cur.samples
-    this.sampleUniforms.uSheets.value = this.cur.sheets
-    const beads = this.cur.sheets > 0.5 // the bead colours are the palette colours, not tone mapped
-    const pm = samples.material as THREE.ShaderMaterial
-    if (pm.toneMapped === beads) {
-      pm.toneMapped = !beads
-      pm.needsUpdate = true
-    }
     this.sampleUniforms.uProgress.value = s.grow ? clock.progress * 1.02 : 1.02
     // coverage: kept while the samples fade out on the next step (they would come back otherwise)
     if (s.cover)
@@ -1355,6 +1314,46 @@ class PipelineStage {
 
   /** Inset camera: from the eye of the Step 4 view (fixed to the bunny) to the focus, framing the
    * region; it does not follow the orbit camera. */
+  /** Slab inset camera: at the focus, looking along the surface (the tangent direction nearest to
+   * the main view direction), its up the surface normal, so the outer sheet is above the inner one;
+   * the slab, across that direction. */
+  setupSlabCamera(region: number) {
+    const d = this.data!
+    const { content, camera } = this.ps
+    const local = content.worldToLocal(this.focus.clone())
+    const V = d.bunnyPos
+    let best = 0
+    let bd = Infinity
+    for (let i = 0; i < V.length / 3; i++) {
+      const dd = (V[3 * i] - local.x) ** 2 + (V[3 * i + 1] - local.y) ** 2 + (V[3 * i + 2] - local.z) ** 2
+      if (dd < bd) {
+        bd = dd
+        best = i
+      }
+    }
+    if (this.slabNormal.vertex !== best)
+      this.slabNormal = { vertex: best, normal: vertexNormal(d, best) }
+    const up = this.slabNormal.normal.clone().transformDirection(content.matrixWorld)
+    const view = camera.getWorldDirection(new THREE.Vector3())
+    view.addScaledVector(up, -view.dot(up)).normalize()
+    const dist = camera.position.distanceTo(this.focus)
+    const cam = this.insetCamera
+    cam.position.copy(this.focus).addScaledVector(view, -dist)
+    cam.up.copy(up)
+    cam.lookAt(this.focus)
+    cam.fov = 2 * THREE.MathUtils.radToDeg(Math.atan(region / 2 / Math.max(dist, 1e-4)))
+    cam.aspect = 1
+    cam.near = dist * 0.05
+    cam.far = dist * 20
+    cam.updateProjectionMatrix()
+    cam.updateMatrixWorld()
+    const half = this.slabHalf = this.settings.sheets.thickness / 2 * content.scale.x
+    const [a, b] = this.slabPlanes
+    a.setFromNormalAndCoplanarPoint(view, this.focus).constant += half
+    b.setFromNormalAndCoplanarPoint(view.clone().negate(), this.focus).constant += half
+    this.sampleUniforms.uSlab.value.set(view.x, view.y, view.z, -view.dot(this.focus))
+  }
+
   setupInsetCamera(region: number) {
     const v = this.settings.views[this.step]
     const object = new THREE.Matrix4().compose(
@@ -1378,22 +1377,47 @@ class PipelineStage {
     cam.updateMatrixWorld()
   }
 
+  /** The slab inset, drawn over the main view: its square cleared, the shell and the samples kept
+   * in the slab, the sheets in their colours, no rays. */
+  drawSlab(draw: () => void) {
+    const { renderer } = this.ps
+    const rays = [...this.arrows, this.contacts!]
+    const shown = rays.map(m => m.visible)
+    const planes = this.shellMaterials.map(m => m.clippingPlanes)
+    for (const m of rays)
+      m.visible = false
+    for (const m of this.shellMaterials)
+      m.clippingPlanes = this.slabPlanes
+    this.sampleUniforms.uSlabHalf.value = this.slabHalf
+    renderer.autoClear = true // clears the square of the inset (the scissor)
+    draw()
+    renderer.autoClear = false
+    this.sampleUniforms.uSlabHalf.value = -1
+    this.shellMaterials.forEach((m, i) => m.clippingPlanes = planes[i])
+    rays.forEach((m, i) => m.visible = shown[i])
+  }
+
   render() {
     const { renderer, scene, camera, size, content } = this.ps
     const w = size.width
     const h = size.height
-    const region = this.spec.inset ? this.settings.views[this.step].inset : undefined
+    // the slab inset needs the samples (it may be asked for while the data loads)
+    const region = this.spec.inset && (this.samples || !this.spec.slab) ? this.settings.views[this.step].inset : undefined
     const inset = !!region
     const split = this.spec.split && this.cur.mesh > 0.01
     // zoomed insets: a column of squares on the right, spheres on top, mesh below; or one square
     // of the full height
     const big = inset && !split && this.spec.bigInset
-    const side = big ? Math.floor(Math.min(h, w * 0.5)) : inset ? Math.floor(Math.min(h / 2 - 4, w * 0.22)) : 0
-    const mainW = inset ? w - side - 12 : w
+    const slab = inset && !!this.spec.slab
+    const side = slab ? Math.floor(Math.min(h * 0.38, w * 0.26)) : big ? Math.floor(Math.min(h, w * 0.5)) : inset ? Math.floor(Math.min(h / 2 - 4, w * 0.22)) : 0
+    const mainW = inset && !slab ? w - side - 12 : w
     const regionWorld = (region?.size ?? 0) * content.scale.x
     if (region) {
       content.localToWorld(this.focus.set(...region.focus))
-      this.setupInsetCamera(regionWorld)
+      if (slab)
+        this.setupSlabCamera(regionWorld)
+      else
+        this.setupInsetCamera(regionWorld)
     }
     const draw = (x: number, y: number, vw: number, vh: number, cam: THREE.Camera = camera) => {
       renderer.setViewport(x, y, vw, vh)
@@ -1402,7 +1426,6 @@ class PipelineStage {
         // dot size in this view; smaller in the inset (individual samples, both sheets)
         this.sampleUniforms.uViewportHeight.value = vh * renderer.getPixelRatio()
         this.sampleUniforms.uSize.value = this.settings.samples.size * (cam === this.insetCamera ? INSET_DOT : 1)
-          * THREE.MathUtils.lerp(1, this.settings.sheets.sheetSize, this.cur.sheets)
       }
       // wire widths are in pixels of the view drawn
       for (const w of [this.wire, ...this.connectWires])
@@ -1428,7 +1451,10 @@ class PipelineStage {
       this.panels.push({ x, w: vw, layers })
       if (!inset)
         return
-      draw(w - side, row ? 0 : h - side, side, side, this.insetCamera)
+      if (slab)
+        this.drawSlab(() => draw(w - side, h - side, side, side, this.insetCamera))
+      else
+        draw(w - side, row ? 0 : h - side, side, side, this.insetCamera)
       const p = this.focus.clone().project(camera)
       const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion)
       const q = this.focus.clone().addScaledVector(right, regionWorld).project(camera)
@@ -1473,8 +1499,6 @@ export function pipelineStage(): PipelineStage {
 
 const TET_ORANGE = new THREE.Color('#F07A3A') // tetrahedral cells, as in the paper figure
 const COVER_DELTA = 0.01 // dilation δ of the run (bunny units)
-const CUT_SHIFT = [0.04, -0.06] // sampling cut: its corner from the bunny centre, along the view right and up (world)
-const CUT_TILT = THREE.MathUtils.degToRad(15) // sampling cut: its faces turned toward the camera
 const RUN_ALPHA = 0.005 // α of the run (bunny units): the samples (samples.bin) lie on this level set
 // coverage timeline (0..1): the sphere of rank k (0..1, largest first) grows in from k × COVER_SPAN,
 // for COVER_GROW; its samples take its colour, then shrink away (POINTS_VERT)
@@ -1700,14 +1724,32 @@ vec3 sliceColor() {
   return mix(col, uAlphaColor, uAlphaOn * (1.0 - smoothstep(1.0 * apx, 2.5 * apx, ad)));
 }`
 
+/** Normal of the bunny at a vertex: the area-weighted normals of its faces (bunny units). */
+function vertexNormal(d: PipelineData, v: number): THREE.Vector3 {
+  const V = d.bunnyPos
+  const F = d.bunnyIndex
+  const n = new THREE.Vector3()
+  const a = new THREE.Vector3()
+  const b = new THREE.Vector3()
+  const c = new THREE.Vector3()
+  for (let t = 0; t < F.length; t += 3) {
+    if (F[t] !== v && F[t + 1] !== v && F[t + 2] !== v)
+      continue
+    a.fromArray(V, 3 * F[t])
+    b.fromArray(V, 3 * F[t + 1]).sub(a)
+    c.fromArray(V, 3 * F[t + 2]).sub(a)
+    n.add(b.cross(c))
+  }
+  return n.normalize()
+}
+
 /**
- * Side of each sample (0: outside the surface, 1: inside): the side of the nearest bunny vertex,
- * along its normal. The samples lie at ±α from the surface, much closer than this test needs.
+ * Sheet of each sample (0: outside the surface, 1: inside): its side of the nearest bunny vertex,
+ * along the vertex normal. The samples lie at ±α from the surface, far closer than this test needs.
  */
 function sampleSides(d: PipelineData): Float32Array {
   const V = d.bunnyPos
   const F = d.bunnyIndex
-  const nv = V.length / 3
   const N = new Float32Array(V.length)
   const a = new THREE.Vector3()
   const b = new THREE.Vector3()
@@ -1723,10 +1765,10 @@ function sampleSides(d: PipelineData): Float32Array {
       N[3 * F[t + k] + 2] += b.z
     }
   }
-  const h = 0.02 // hash cell (bunny units), several vertex spacings
+  const h = 0.02 // hash cell (bunny units), a few vertex spacings
   const key = (x: number, y: number, z: number) => `${x},${y},${z}`
   const cells = new Map<string, number[]>()
-  for (let i = 0; i < nv; i++) {
+  for (let i = 0; i < V.length / 3; i++) {
     const k = key(Math.floor(V[3 * i] / h), Math.floor(V[3 * i + 1] / h), Math.floor(V[3 * i + 2] / h))
     if (!cells.has(k))
       cells.set(k, [])
@@ -1738,15 +1780,12 @@ function sampleSides(d: PipelineData): Float32Array {
     const x = P[3 * s]
     const y = P[3 * s + 1]
     const z = P[3 * s + 2]
-    const cx = Math.floor(x / h)
-    const cy = Math.floor(y / h)
-    const cz = Math.floor(z / h)
     let best = -1
     let bd = Infinity
     for (let i = -1; i <= 1; i++) {
       for (let j = -1; j <= 1; j++) {
         for (let k = -1; k <= 1; k++) {
-          for (const v of cells.get(key(cx + i, cy + j, cz + k)) ?? []) {
+          for (const v of cells.get(key(Math.floor(x / h) + i, Math.floor(y / h) + j, Math.floor(z / h) + k)) ?? []) {
             const dd = (V[3 * v] - x) ** 2 + (V[3 * v + 1] - y) ** 2 + (V[3 * v + 2] - z) ** 2
             if (dd < bd) {
               bd = dd
@@ -1769,13 +1808,12 @@ uniform float uSize;
 uniform float uViewportHeight;
 uniform float uProgress;
 uniform float uCover;
-uniform vec4 uCut;
-uniform vec4 uCut2;
-uniform float uCutOn;
 attribute float aReveal;
 attribute float aCover;
 attribute vec3 aTint;
 attribute float aSide;
+uniform vec4 uSlab;
+uniform float uSlabHalf;
 varying float vShow;
 varying vec3 vTint;
 varying float vTintOn;
@@ -1792,9 +1830,8 @@ void main() {
   vTintOn = uCover < 0.0 ? 0.0 : smoothstep(at, at + 0.02, uCover);
   if (uCover >= 0.0)
     vShow *= 1.0 - smoothstep(at + 0.12, at + 0.22, uCover);
-  // sampling step: the corner beyond both cut planes is cut away
-  vec3 wp = (modelMatrix * vec4(position, 1.0)).xyz;
-  if (uCutOn > 0.5 && dot(uCut.xyz, wp) + uCut.w < 0.0 && dot(uCut2.xyz, wp) + uCut2.w < 0.0)
+  // slab inset: only the samples in the slab
+  if (uSlabHalf >= 0.0 && abs(dot(uSlab.xyz, (modelMatrix * vec4(position, 1.0)).xyz) + uSlab.w) > uSlabHalf)
     vShow = 0.0;
   gl_PointSize = vShow * uSize * scale * projectionMatrix[1][1] * uViewportHeight * 0.5 / -mv.z;
 }`
@@ -1803,7 +1840,7 @@ const POINTS_FRAG = /* glsl */`
 uniform vec3 uColor;
 uniform vec3 uOuter;
 uniform vec3 uInner;
-uniform float uSheets;
+uniform float uSlabHalf;
 uniform float uOpacity;
 uniform vec3 uLightDir[3];
 uniform float uLightE[3];
@@ -1820,11 +1857,8 @@ void main() {
   float e = uAmbient * 3.14159265;
   for (int i = 0; i < 3; i++)
     e += uLightE[i] * max(dot(n, uLightDir[i]), 0.0);
-  vec3 base = mix(uColor, mix(uOuter, uInner, vSide), uSheets);
-  vec3 lit = mix(base, vTint, vTintOn) / 3.14159265 * e;
-  // sampling step: an opaque matte bead, lit by the key light, darker toward its rim
-  float bead = (0.5 + 0.5 * max(dot(n, uLightDir[0]), 0.0)) * (0.75 + 0.25 * n.z);
-  gl_FragColor = vec4(mix(lit, base * bead, uSheets), uOpacity);
+  vec3 base = uSlabHalf >= 0.0 ? mix(uOuter, uInner, vSide) : uColor; // slab inset: the two sheets
+  gl_FragColor = vec4(mix(base, vTint, vTintOn) / 3.14159265 * e, uOpacity);
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
 }`
