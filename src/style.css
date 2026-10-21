@@ -96,7 +96,7 @@ mark { color: inherit; font-weight: 600; background: linear-gradient(transparent
 .side .k1, .side .k2 { opacity: 0; transition: opacity .4s; }
 .side .at1 .k1, .side .at2 .k2 { opacity: 1; }
 .ysvg .axis { transition: stroke .4s; }
-.side .at2 .ysvg .axis { stroke: #E0566B; stroke-dasharray: 9 7; }
+.side .at2 .ysvg .axis { stroke: #2E9E4F; stroke-dasharray: 9 7; }
 .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .pair img { border-radius: 8px; }
 .legend { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--mut); }

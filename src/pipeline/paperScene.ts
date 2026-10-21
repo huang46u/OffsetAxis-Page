@@ -40,6 +40,7 @@ export function createPaperScene(container: HTMLElement): PaperScene {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.shadowMap.enabled = true
   renderer.shadowMap.type = THREE.PCFShadowMap
+  renderer.localClippingEnabled = true // material.clippingPlanes (the shell split by the slice)
   container.appendChild(renderer.domElement)
 
   const scene = new THREE.Scene()

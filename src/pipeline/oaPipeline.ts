@@ -210,7 +210,7 @@ export function loadPipeline(): Promise<PipelineData> {
 interface SceneSpec {
   shell: number // bunny shell opacity
   solid?: number // shell drawn as an opaque matte surface instead of the paper shell
-  tint?: number // paper shell tinted red (the medial axis of the key-idea sketch)
+  tint?: number // paper shell tinted green (the medial axis of the key-idea sketch)
   slice: number // UDF slice opacity
   alphaLine: number // α level drawn on the slice
   sweep?: boolean // slice sweeps through the model (loops)
@@ -239,7 +239,7 @@ export const SCENES: Record<PipelineStep, SceneSpec[]> = {
     { ...S0, slice: 1, sweep: true, duration: 'sweep' },
   ],
   offset: [
-    // the surface to extract, then its α-offset on the slice, then the shell turns red with the
+    // the surface to extract, then its α-offset on the slice, then the shell turns green with the
     // medial axis of the key-idea sketch
     { ...S0, solid: 1 },
     { ...S0, slice: 1, alphaLine: 1 },
@@ -327,9 +327,17 @@ class PipelineStage {
     uSolid: { value: 0 },
     uSolidColor: { value: new THREE.Color(0.72, 0.72, 0.74) }, // light gray, matte (linear)
     uTint: { value: 0 },
-    uTintColor: { value: new THREE.Color('#E0566B') }, // the red dashes of the key-idea sketch
+    uTintColor: { value: new THREE.Color('#2E9E4F') }, // the green dashes of the key-idea sketch
   }
   shellDepth: THREE.Material | undefined
+  // copies of the shell (same geometry), split by the slice: the part behind it is drawn before it
+  shellFar: THREE.Mesh[] = []
+  shellFarMaterials: THREE.Material[] = []
+  farPlane = new THREE.Plane()
+  nearPlane = new THREE.Plane()
+  farClip = [this.farPlane]
+  nearClip = [this.nearPlane]
+  clipTmp = { p: new THREE.Vector3(), n: new THREE.Vector3(), c: new THREE.Vector3(), q: new THREE.Quaternion() }
   slice: THREE.Mesh | null = null
   sliceUniforms: Record<string, THREE.IUniform> = {}
   sliceBase = new THREE.Vector3()
@@ -416,6 +424,16 @@ class PipelineStage {
       this.shell.push(mesh)
       this.shellMaterials.push(m)
     }
+    for (const side of [THREE.BackSide, THREE.FrontSide]) {
+      const m = fadingShell(createPaperShellMaterial(side, ps.paper), this.shellUniforms)
+      const mesh = new THREE.Mesh(geo, m)
+      mesh.renderOrder = 0
+      mesh.layers.enable(LAYER_SPHERES)
+      mesh.visible = false
+      ps.content.add(mesh)
+      this.shellFar.push(mesh)
+      this.shellFarMaterials.push(m)
+    }
 
     geo.computeBoundingBox()
     this.bboxLocal.copy(geo.boundingBox!)
@@ -496,6 +514,37 @@ class PipelineStage {
     plane.renderOrder = 1
     plane.receiveShadow = true
     this.ps.content.add(plane)
+  }
+
+  /** While the slice is visible, the shell is split by its plane: the near part (camera side) is
+   * drawn over the slice, the far part under it, so the slice covers it during the whole fade. */
+  updateShellClip() {
+    const { p, n, c, q } = this.clipTmp
+    const on = this.cur.slice > 0.01
+    if (on) {
+      // slice plane in world space; the normal points to the camera side (sign s)
+      this.slice!.getWorldPosition(p)
+      n.set(0, 0, 1).applyQuaternion(this.slice!.getWorldQuaternion(q)).normalize()
+      const s = Math.sign(n.dot(this.ps.camera.getWorldPosition(c).sub(p))) || 1
+      // clipping keeps the points with distanceToPoint >= 0
+      this.nearPlane.setFromNormalAndCoplanarPoint(n.multiplyScalar(s), p)
+      this.farPlane.setFromNormalAndCoplanarPoint(n.multiplyScalar(-1), p)
+    }
+    // the program changes only when the plane count does (null <-> one plane)
+    for (const m of this.shellMaterials) {
+      if (!!m.clippingPlanes !== on)
+        m.needsUpdate = true
+      m.clippingPlanes = on ? this.nearClip : null
+    }
+    this.shellFarMaterials.forEach((m, i) => {
+      const orig = this.shellMaterials[i]
+      if (!!m.clippingPlanes !== on)
+        m.needsUpdate = true
+      m.clippingPlanes = on ? this.farClip : null
+      ;(m as THREE.MeshLambertMaterial).opacity = this.cur.shell
+      m.depthWrite = orig.depthWrite
+      this.shellFar[i].visible = on && this.cur.shell > 0.01
+    })
   }
 
   buildSamples(d: PipelineData) {
@@ -1046,6 +1095,7 @@ class PipelineStage {
     ;(slice.material as THREE.MeshStandardMaterial).depthWrite = this.cur.slice > 0.99
     this.sliceUniforms.uAlphaOn.value = this.cur.alphaLine
     slice.updateMatrixWorld()
+    this.updateShellClip()
     this.sliceUniforms.uToLocal.value.copy(this.ps.content.matrixWorld).invert().multiply(slice.matrixWorld)
 
     // sampling: frame of the fast forward schedule (20 fps)
