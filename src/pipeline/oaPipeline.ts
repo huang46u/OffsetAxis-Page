@@ -209,6 +209,8 @@ export function loadPipeline(): Promise<PipelineData> {
 
 interface SceneSpec {
   shell: number // bunny shell opacity
+  solid?: number // shell drawn as an opaque matte surface instead of the paper shell
+  tint?: number // paper shell tinted red (the medial axis of the key-idea sketch)
   slice: number // UDF slice opacity
   alphaLine: number // α level drawn on the slice
   sweep?: boolean // slice sweeps through the model (loops)
@@ -237,7 +239,11 @@ export const SCENES: Record<PipelineStep, SceneSpec[]> = {
     { ...S0, slice: 1, sweep: true, duration: 'sweep' },
   ],
   offset: [
+    // the surface to extract, then its α-offset on the slice, then the shell turns red with the
+    // medial axis of the key-idea sketch
+    { ...S0, solid: 1 },
     { ...S0, slice: 1, alphaLine: 1 },
+    { ...S0, slice: 1, alphaLine: 1, tint: 1 },
   ],
   sampling: [
     { ...S0, rays: true, duration: 'rays' },
@@ -303,7 +309,7 @@ class PipelineStage {
   step: PipelineStep = 'udf'
   click = 0
   spec: SceneSpec = S0
-  cur = { shell: 1, slice: 0, alphaLine: 0, samples: 0, spheres: 0, mesh: 0, rays: 0, connect: 0 }
+  cur = { shell: 1, solid: 0, tint: 0, slice: 0, alphaLine: 0, samples: 0, spheres: 0, mesh: 0, rays: 0, connect: 0 }
   last = 0
 
   // step views: the pose shown, and the move between two steps
@@ -317,6 +323,13 @@ class PipelineStage {
   rim = new THREE.DirectionalLight(0xFFFFFF, 1)
   shell: THREE.Mesh[] = []
   shellMaterials: THREE.Material[] = []
+  shellUniforms = {
+    uSolid: { value: 0 },
+    uSolidColor: { value: new THREE.Color(0.72, 0.72, 0.74) }, // light gray, matte (linear)
+    uTint: { value: 0 },
+    uTintColor: { value: new THREE.Color('#E0566B') }, // the red dashes of the key-idea sketch
+  }
+  shellDepth: THREE.Material | undefined
   slice: THREE.Mesh | null = null
   sliceUniforms: Record<string, THREE.IUniform> = {}
   sliceBase = new THREE.Vector3()
@@ -391,13 +404,13 @@ class PipelineStage {
     geo.setIndex(new THREE.BufferAttribute(d.bunnyIndex, 1))
     geo.computeVertexNormals()
     for (const side of [THREE.BackSide, THREE.FrontSide]) {
-      const m = fadingShell(createPaperShellMaterial(side, ps.paper))
+      const m = fadingShell(createPaperShellMaterial(side, ps.paper), this.shellUniforms)
       const mesh = new THREE.Mesh(geo, m)
       mesh.renderOrder = 2
       mesh.layers.enable(LAYER_SPHERES)
       if (side === THREE.FrontSide) {
         mesh.castShadow = true
-        mesh.customDepthMaterial = createPaperShellDepthMaterial(ps.paper)
+        mesh.customDepthMaterial = this.shellDepth = createPaperShellDepthMaterial(ps.paper)
       }
       ps.content.add(mesh)
       this.shell.push(mesh)
@@ -955,7 +968,7 @@ class PipelineStage {
   apply(instant: boolean) {
     if (instant) {
       const s = this.spec
-      Object.assign(this.cur, { shell: s.shell, slice: s.slice, alphaLine: s.alphaLine, samples: s.samples && !s.grow ? 1 : 0, spheres: s.spheres, mesh: s.mesh, rays: s.rays ? 1 : 0, connect: s.connect ?? 0 })
+      Object.assign(this.cur, { shell: s.shell, solid: s.solid ?? 0, tint: s.tint ?? 0, slice: s.slice, alphaLine: s.alphaLine, samples: s.samples && !s.grow ? 1 : 0, spheres: s.spheres, mesh: s.mesh, rays: s.rays ? 1 : 0, connect: s.connect ?? 0 })
     }
   }
 
@@ -985,6 +998,8 @@ class PipelineStage {
         this.cur[key] = target
     }
     ease('shell', s.shell)
+    ease('solid', s.solid ?? 0)
+    ease('tint', s.tint ?? 0)
     ease('slice', s.slice)
     ease('alphaLine', s.alphaLine)
     ease('samples', s.samples)
@@ -1013,6 +1028,12 @@ class PipelineStage {
       (m as THREE.MeshLambertMaterial).opacity = this.cur.shell
     for (const mesh of this.shell)
       mesh.visible = this.cur.shell > 0.01
+    // solid: the front faces hide each other and cast a full shadow
+    const solid = this.cur.solid > 0.5
+    this.shellUniforms.uSolid.value = this.cur.solid
+    this.shellUniforms.uTint.value = this.cur.tint
+    this.shellMaterials[1].depthWrite = solid
+    this.shell[1].customDepthMaterial = solid ? undefined : this.shellDepth
 
     // slice
     const slice = this.slice!
@@ -1457,14 +1478,22 @@ void main() {`)
   return material
 }
 
-function fadingShell(material: THREE.Material): THREE.Material {
+function fadingShell(material: THREE.Material, uniforms: Record<string, THREE.IUniform>): THREE.Material {
   const compile = material.onBeforeCompile
   material.onBeforeCompile = (shader, renderer) => {
     compile.call(material, shader, renderer)
-    shader.fragmentShader = shader.fragmentShader.replace(
-      'diffuseColor.a = mix(uInteriorOpacity, 1.0, fac);',
-      'diffuseColor.a = mix(uInteriorOpacity, 1.0, fac) * opacity;',
-    )
+    Object.assign(shader.uniforms, uniforms)
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>
+uniform float uSolid;
+uniform vec3 uSolidColor;
+uniform float uTint;
+uniform vec3 uTintColor;`)
+      .replace(
+        'diffuseColor.a = mix(uInteriorOpacity, 1.0, fac);',
+        `diffuseColor.rgb = mix(mix(diffuseColor.rgb, uTintColor, uTint), uSolidColor, uSolid);
+diffuseColor.a = mix(mix(uInteriorOpacity, 1.0, fac), 1.0, uSolid) * opacity;`,
+      )
   }
   material.customProgramCacheKey = () => 'oa-fading-shell'
   return material

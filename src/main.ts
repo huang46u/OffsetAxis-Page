@@ -113,7 +113,7 @@ new ResizeObserver(() => {
 /** Each step plays the slide clicks of its scene list in turn (oaPipeline SCENES); hold overrides STILL_MS. */
 const STEPS: { key: PipelineStep, clicks: number, hold?: number, frames?: 'sampling2d' | 'optimization2d' }[] = [
   { key: 'udf', clicks: 3 },
-  { key: 'offset', clicks: 3, hold: 2600 }, // one 3D scene; the clicks step the 2D sketch and text
+  { key: 'offset', clicks: 3, hold: 1500 },
   { key: 'sampling', clicks: 2, frames: 'sampling2d' },
   { key: 'init', clicks: 2 },
   { key: 'optimization', clicks: 2, frames: 'optimization2d' },
