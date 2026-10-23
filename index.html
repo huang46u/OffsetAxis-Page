@@ -60,14 +60,15 @@
 
     <section id="method">
       <h2>Method</h2>
-      <p class="kicker">Six steps, from a distance field to a mesh, on the Stanford bunny. Click a step; drag the 3D view to orbit, scroll to zoom.</p>
+      <p class="kicker">Seven steps, from a distance field to a mesh, on the Stanford bunny. Click a step; drag the 3D view to orbit, scroll to zoom.</p>
       <div class="steps" role="tablist" aria-label="Pipeline steps">
         <button type="button" role="tab" class="step" data-i="0"><span>1</span>Input UDF</button>
         <button type="button" role="tab" class="step" data-i="1"><span>2</span>Offset volume</button>
         <button type="button" role="tab" class="step" data-i="2"><span>3</span>Sampling</button>
         <button type="button" role="tab" class="step" data-i="3"><span>4</span>Initialization</button>
-        <button type="button" role="tab" class="step" data-i="4"><span>5</span>Optimization</button>
-        <button type="button" role="tab" class="step" data-i="5"><span>6</span>Connectivity</button>
+        <button type="button" role="tab" class="step" data-i="4"><span>5</span>Connectivity</button>
+        <button type="button" role="tab" class="step" data-i="5"><span>6</span>Optimization</button>
+        <button type="button" role="tab" class="step" data-i="6"><span>7</span>Post-processing</button>
       </div>
 
       <div class="viewer">
@@ -111,25 +112,29 @@
           </article>
           <article data-step="3" hidden>
             <h3><i>4</i>Initial medial spheres</h3>
-            <div class="pair init-only">
+            <div class="pair">
               <img src="/img/method/medial_spheres_init_top.webp" alt="One candidate medial sphere per offset-surface sample">
               <img src="/img/method/medial_spheres_init_bottom.webp" alt="The largest sphere covers the samples in its dilated support">
             </div>
-            <p class="init-only">Each sample gets its maximal ball inside the offset volume <span class="cite">[Ma et al. 2012]</span>. A greedy cover keeps the largest sphere, drops the samples it covers and repeats <span class="cite">[Dou et al. 2022]</span>.</p>
-            <canvas class="frames mesh-only" data-frames="initmesh2d" width="512" height="512" role="img" aria-label="2D illustration: neighbouring initial circles are linked into a mesh"></canvas>
-            <p class="mesh-only"><span class="k3">Mesh of the <b>initial spheres</b>, connected as in <b>VMAS</b> <span class="cite">[Huang et al. 2024]</span> (dual of the clusters).</span> <span class="k4"><b>Poor quality</b>, many slivers: the spheres need to be optimized.</span></p>
+            <p>Each sample gets its maximal ball inside the offset volume <span class="cite">[Ma et al. 2012]</span>. A greedy cover keeps the largest sphere, drops the samples it covers and repeats <span class="cite">[Dou et al. 2022]</span>.</p>
           </article>
           <article data-step="4" hidden>
-            <h3><i>5</i>Variational optimization</h3>
+            <h3><i>5</i>Connectivity: the dual of the clusters</h3>
+            <canvas class="frames" data-frames="initmesh2d" width="512" height="512" role="img" aria-label="2D illustration: neighbouring initial circles are linked into a mesh"></canvas>
+            <p>Sphere centres become vertices; two spheres are linked when neighbouring samples belong to them, as in VMAS <span class="cite">[Huang et al. 2024]</span>. Triangles are 3-cliques.</p>
+            <p><span class="k1">The mesh of the <b>initial spheres</b> grows among them.</span> <span class="k2"><b>Poor quality</b>, many slivers: the spheres need to be optimized.</span></p>
+          </article>
+          <article data-step="5" hidden>
+            <h3><i>6</i>Variational optimization</h3>
             <canvas class="frames" data-frames="optimization2d" width="512" height="512" role="img" aria-label="2D illustration: medial spheres converge inside the offset volume"></canvas>
             <p class="formula">
               <math display="block"><msub><mi>E</mi><mi>i</mi></msub><mo>=</mo><munder><mo>∑</mo><mrow><msub><mi>v</mi><mi>j</mi></msub><mo>∈</mo><msub><mi>𝒞</mi><mi>i</mi></msub></mrow></munder><mo>(</mo><msub><mi>Q</mi><msub><mi>v</mi><mi>j</mi></msub></msub><mo>(</mo><msub><mi mathvariant="bold">c</mi><mi>i</mi></msub><mo>,</mo><msub><mi>r</mi><mi>i</mi></msub><mo>)</mo><mo>+</mo><mi>μ</mi><msub><mi>L</mi><msub><mi>v</mi><mi>j</mi></msub></msub><mo>(</mo><msub><mi mathvariant="bold">c</mi><mi>i</mi></msub><mo>)</mo><mo>)</mo></math>
             </p>
             <p>We alternate two steps: assign each sample to its best sphere, then update each sphere. The SQEM <i>Q</i> <span class="cite">[Thiery et al. 2013]</span> plus a line quadric <i>L</i> <span class="cite">[Liu et al. 2025]</span> keep the update quadratic: <b>one linear solve</b> per sphere.</p>
           </article>
-          <article data-step="5" hidden>
-            <h3><i>6</i>The mesh is the dual of the clusters</h3>
-            <p>Sphere centres become vertices; two spheres are linked when neighbouring samples belong to them. Triangles are 3-cliques; the few tetrahedra left (orange) are removed by thinning procedure inspired by <span class="cite">[Wang et al. 2025]</span>.</p>
+          <article data-step="6" hidden>
+            <h3><i>7</i>Post-processing: thinning</h3>
+            <p>The same connectivity on the optimized spheres leaves a few tetrahedra (orange). A thinning procedure inspired by <span class="cite">[Wang et al. 2025]</span> removes them, simplex pairs farthest from the surface first.</p>
             <p>The output has only <b>triangles and segments</b>.</p>
           </article>
         </div>

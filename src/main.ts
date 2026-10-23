@@ -110,25 +110,18 @@ new ResizeObserver(() => {
 
 // ------------------------------------------------------------------ method: the 3D replay of the slides
 
-/**
- * Each step plays the slide clicks of its scene list in turn (oaPipeline SCENES), then those of
- * `then` if any (the next slide, shown in the same step); hold overrides STILL_MS.
- */
-interface Part { key: PipelineStep, clicks: number, frames?: 'sampling2d' | 'optimization2d' | 'initmesh2d' }
-const STEPS: (Part & { hold?: number, then?: Part })[] = [
+/** Each step plays the slide clicks of its scene list in turn (oaPipeline SCENES); hold overrides STILL_MS. */
+const STEPS: { key: PipelineStep, clicks: number, hold?: number, frames?: 'sampling2d' | 'optimization2d' | 'initmesh2d' }[] = [
   { key: 'udf', clicks: 3 },
   { key: 'offset', clicks: 3, hold: 1500 },
   { key: 'sampling', clicks: 2, frames: 'sampling2d' },
-  { key: 'init', clicks: 2, then: { key: 'initmesh', clicks: 3, frames: 'initmesh2d' } },
+  { key: 'init', clicks: 2 },
+  { key: 'initmesh', clicks: 3, frames: 'initmesh2d' },
   { key: 'optimization', clicks: 2, frames: 'optimization2d' },
   { key: 'connect', clicks: 2 },
 ]
 const STILL_MS = 1400 // a scene without a timeline stays this long before the next click
 const PAUSE_MS = 600 // pause at the end of a timeline before the next click
-
-const stepClicks = (s: typeof STEPS[number]) => s.clicks + (s.then?.clicks ?? 0)
-/** The part of step s played at its click c, and the click of that part. */
-const partAt = (s: typeof STEPS[number], c: number): [Part, number] => (s.then && c >= s.clicks ? [s.then, c - s.clicks] : [s, c])
 
 const stepButtons = [...document.querySelectorAll<HTMLButtonElement>('.step')]
 const articles = [...document.querySelectorAll<HTMLElement>('.side article')]
@@ -156,17 +149,16 @@ function showClick(c: number) {
   clearTimeout(advance)
   click = c
   const step = STEPS[current]
-  // the clicks also reveal the article's .k1 / .k2 ... parts, as on the slide
-  for (let k = 1; k < stepClicks(step); k++)
+  // the clicks also reveal the article's .k1 / .k2 parts, as on the slide
+  for (let k = 1; k < step.clicks; k++)
     articles[current].classList.toggle(`at${k}`, k <= c)
   if (stage && pipeline) {
     pipeline.pipelineClock.key = '' // replaying the same scene restarts it
-    const [part, pc] = partAt(step, c)
-    stage.show(part.key, pc)
+    stage.show(step.key, c)
     if (pipeline.pipelineClock.duration > 0)
       return
   }
-  if (c + 1 < stepClicks(step))
+  if (c + 1 < step.clicks)
     advance = window.setTimeout(() => showClick(c + 1), step.hold ?? STILL_MS)
 }
 
@@ -177,7 +169,7 @@ playBtn.addEventListener('click', () => {
   if (!pipeline)
     return
   const clock = pipeline.pipelineClock
-  if (clock.duration === 0 || (clock.progress >= 1 && click + 1 >= stepClicks(STEPS[current])))
+  if (clock.duration === 0 || (clock.progress >= 1 && click + 1 >= STEPS[current].clicks))
     return showClick(0)
   clock.playing = !clock.playing
 })
@@ -238,7 +230,7 @@ function drawOptimization(x: number) {
   crossFade('optimization2d', n, x - n)
 }
 
-/** Initial mesh 2D at click c of its part and the timeline progress p: the circles get linked, then go. */
+/** Initial mesh 2D at click c and the timeline progress p: the circles get linked, then go. */
 function drawInitMesh(c: number, p: number) {
   const canvas = document.querySelector<HTMLCanvasElement>('.frames[data-frames="initmesh2d"]')
   if (!canvas || !frameLib || !pipeline || !initMesh.value)
@@ -266,7 +258,7 @@ async function startStage() {
   })
   effect(() => {
     progress.style.width = `${(clock.duration > 0 ? clock.progress : 1) * 100}%`
-    const done = clock.duration === 0 || (clock.progress >= 1 && click + 1 >= stepClicks(STEPS[current]))
+    const done = clock.duration === 0 || (clock.progress >= 1 && click + 1 >= STEPS[current].clicks)
     playBtn.textContent = done ? '↺' : clock.playing ? '❚❚' : '▶'
     playBtn.setAttribute('aria-label', done ? 'Replay' : clock.playing ? 'Pause' : 'Play')
   })
@@ -282,20 +274,19 @@ async function startStage() {
   effect(() => {
     const x = clock.frame2dExact, t = clock.time2d, key = clock.key, p = clock.progress
     const versions = [frameLib?.frameVersion.sampling2d, frameLib?.frameVersion.optimization2d, initMesh.value]
-    const [part, c] = partAt(STEPS[current], click)
-    const set = part.frames
+    const set = STEPS[current].frames
     if (!set || !frameLib || !versions || !key)
       return
     if (set === 'sampling2d')
       drawSampling(t)
     else if (set === 'initmesh2d')
-      drawInitMesh(c, p)
+      drawInitMesh(click, p)
     else
       drawOptimization(x)
   })
   // a finished timeline moves on to the next click of the step
   effect(() => {
-    if (clock.duration > 0 && clock.progress >= 1 && !clock.playing && click + 1 < stepClicks(STEPS[current])) {
+    if (clock.duration > 0 && clock.progress >= 1 && !clock.playing && click + 1 < STEPS[current].clicks) {
       const next = click + 1
       clearTimeout(advance)
       advance = window.setTimeout(() => showClick(next), PAUSE_MS)
