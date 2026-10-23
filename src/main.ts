@@ -1,6 +1,6 @@
-import { effect } from '@vue/reactivity'
+import { effect, shallowRef } from '@vue/reactivity'
 import type { PipelineStep } from './pipeline/oaPipeline'
-import type { SamplingEvent } from './pipeline/oaFrames'
+import type { InitMesh2d, SamplingEvent } from './pipeline/oaFrames'
 import { GROUPS, type Dataset, type Group, type Method } from './results'
 
 const BASE = import.meta.env.BASE_URL
@@ -110,17 +110,25 @@ new ResizeObserver(() => {
 
 // ------------------------------------------------------------------ method: the 3D replay of the slides
 
-/** Each step plays the slide clicks of its scene list in turn (oaPipeline SCENES); hold overrides STILL_MS. */
-const STEPS: { key: PipelineStep, clicks: number, hold?: number, frames?: 'sampling2d' | 'optimization2d' }[] = [
+/**
+ * Each step plays the slide clicks of its scene list in turn (oaPipeline SCENES), then those of
+ * `then` if any (the next slide, shown in the same step); hold overrides STILL_MS.
+ */
+interface Part { key: PipelineStep, clicks: number, frames?: 'sampling2d' | 'optimization2d' | 'initmesh2d' }
+const STEPS: (Part & { hold?: number, then?: Part })[] = [
   { key: 'udf', clicks: 3 },
   { key: 'offset', clicks: 3, hold: 1500 },
   { key: 'sampling', clicks: 2, frames: 'sampling2d' },
-  { key: 'init', clicks: 2 },
+  { key: 'init', clicks: 2, then: { key: 'initmesh', clicks: 3, frames: 'initmesh2d' } },
   { key: 'optimization', clicks: 2, frames: 'optimization2d' },
   { key: 'connect', clicks: 2 },
 ]
 const STILL_MS = 1400 // a scene without a timeline stays this long before the next click
 const PAUSE_MS = 600 // pause at the end of a timeline before the next click
+
+const stepClicks = (s: typeof STEPS[number]) => s.clicks + (s.then?.clicks ?? 0)
+/** The part of step s played at its click c, and the click of that part. */
+const partAt = (s: typeof STEPS[number], c: number): [Part, number] => (s.then && c >= s.clicks ? [s.then, c - s.clicks] : [s, c])
 
 const stepButtons = [...document.querySelectorAll<HTMLButtonElement>('.step')]
 const articles = [...document.querySelectorAll<HTMLElement>('.side article')]
@@ -148,16 +156,17 @@ function showClick(c: number) {
   clearTimeout(advance)
   click = c
   const step = STEPS[current]
-  // the clicks also reveal the article's .k1 / .k2 parts, as on the slide
-  for (let k = 1; k < step.clicks; k++)
+  // the clicks also reveal the article's .k1 / .k2 ... parts, as on the slide
+  for (let k = 1; k < stepClicks(step); k++)
     articles[current].classList.toggle(`at${k}`, k <= c)
   if (stage && pipeline) {
     pipeline.pipelineClock.key = '' // replaying the same scene restarts it
-    stage.show(step.key, c)
+    const [part, pc] = partAt(step, c)
+    stage.show(part.key, pc)
     if (pipeline.pipelineClock.duration > 0)
       return
   }
-  if (c + 1 < step.clicks)
+  if (c + 1 < stepClicks(step))
     advance = window.setTimeout(() => showClick(c + 1), step.hold ?? STILL_MS)
 }
 
@@ -168,7 +177,7 @@ playBtn.addEventListener('click', () => {
   if (!pipeline)
     return
   const clock = pipeline.pipelineClock
-  if (clock.duration === 0 || (clock.progress >= 1 && click + 1 >= STEPS[current].clicks))
+  if (clock.duration === 0 || (clock.progress >= 1 && click + 1 >= stepClicks(STEPS[current])))
     return showClick(0)
   clock.playing = !clock.playing
 })
@@ -180,6 +189,7 @@ type FrameSet = 'sampling2d' | 'optimization2d'
 const FRAME_COUNT: Record<FrameSet, number> = { sampling2d: 70, optimization2d: 110 }
 let frameLib: typeof import('./pipeline/oaFrames') | undefined
 let samplingData: { events: SamplingEvent[], rayEnd: number, frameCount: number } | undefined
+const initMesh = shallowRef<InitMesh2d>()
 
 /** Draws decoded frame file n (1-based) of the set, with frame n + 1 faded in by alpha on top. */
 function crossFade(set: FrameSet, n: number, alpha: number) {
@@ -228,6 +238,15 @@ function drawOptimization(x: number) {
   crossFade('optimization2d', n, x - n)
 }
 
+/** Initial mesh 2D at click c of its part and the timeline progress p: the circles get linked, then go. */
+function drawInitMesh(c: number, p: number) {
+  const canvas = document.querySelector<HTMLCanvasElement>('.frames[data-frames="initmesh2d"]')
+  if (!canvas || !frameLib || !pipeline || !initMesh.value)
+    return
+  const b = pipeline.buildPhases(c === 1 ? p : c > 1 ? 1 : 0)
+  frameLib.drawInitMesh2d(canvas.getContext('2d')!, initMesh.value, c === 0 ? { grow: 0, fade: 0, dots: 0 } : { ...b, dots: Math.min(1, b.grow * 3) })
+}
+
 async function startStage() {
   pipeline = await import('./pipeline/oaPipeline')
   frameLib = await import('./pipeline/oaFrames')
@@ -236,6 +255,7 @@ async function startStage() {
   stage.attach($('#stage'))
   frameLib.preloadFrames('sampling2d').catch(err => console.warn(err))
   frameLib.preloadFrames('optimization2d').catch(err => console.warn(err))
+  frameLib.loadInitMesh2d().then((d) => { initMesh.value = d }).catch(err => console.warn(err))
   const clock = pipeline.pipelineClock
 
   new IntersectionObserver(([e]) => { stage!.ps.active = e.isIntersecting }).observe($('#stage'))
@@ -246,7 +266,7 @@ async function startStage() {
   })
   effect(() => {
     progress.style.width = `${(clock.duration > 0 ? clock.progress : 1) * 100}%`
-    const done = clock.duration === 0 || (clock.progress >= 1 && click + 1 >= STEPS[current].clicks)
+    const done = clock.duration === 0 || (clock.progress >= 1 && click + 1 >= stepClicks(STEPS[current]))
     playBtn.textContent = done ? '↺' : clock.playing ? '❚❚' : '▶'
     playBtn.setAttribute('aria-label', done ? 'Replay' : clock.playing ? 'Pause' : 'Play')
   })
@@ -260,19 +280,22 @@ async function startStage() {
   // read the clock first (see above): the frames are drawn at the timeline position, and again
   // when a frame gets decoded (frameVersion is read so that the effect tracks it)
   effect(() => {
-    const x = clock.frame2dExact, t = clock.time2d
-    const versions = [frameLib?.frameVersion.sampling2d, frameLib?.frameVersion.optimization2d]
-    const set = STEPS[current].frames
-    if (!set || !frameLib || !versions)
+    const x = clock.frame2dExact, t = clock.time2d, key = clock.key, p = clock.progress
+    const versions = [frameLib?.frameVersion.sampling2d, frameLib?.frameVersion.optimization2d, initMesh.value]
+    const [part, c] = partAt(STEPS[current], click)
+    const set = part.frames
+    if (!set || !frameLib || !versions || !key)
       return
     if (set === 'sampling2d')
       drawSampling(t)
+    else if (set === 'initmesh2d')
+      drawInitMesh(c, p)
     else
       drawOptimization(x)
   })
   // a finished timeline moves on to the next click of the step
   effect(() => {
-    if (clock.duration > 0 && clock.progress >= 1 && !clock.playing && click + 1 < STEPS[current].clicks) {
+    if (clock.duration > 0 && clock.progress >= 1 && !clock.playing && click + 1 < stepClicks(STEPS[current])) {
       const next = click + 1
       clearTimeout(advance)
       advance = window.setTimeout(() => showClick(next), PAUSE_MS)

@@ -39,8 +39,8 @@ export const OA_PRESET: BlenderLook = mergeLook(BLENDER_BASE, {
   paper: { color: [0.9076, 0.789, 0.8337], blend: 0.8, rampPos: [0, 0.364, 0.86, 1], rampVal: [0.0131, 0.1337, 0.2771, 1] },
 })
 
-export type PipelineStep = 'udf' | 'offset' | 'sampling' | 'init' | 'optimization' | 'connect'
-export const PIPELINE_STEPS: PipelineStep[] = ['udf', 'offset', 'sampling', 'init', 'optimization', 'connect']
+export type PipelineStep = 'udf' | 'offset' | 'sampling' | 'init' | 'initmesh' | 'optimization' | 'connect'
+export const PIPELINE_STEPS: PipelineStep[] = ['udf', 'offset', 'sampling', 'init', 'initmesh', 'optimization', 'connect']
 
 /** Object (Blender frame, like a BlenderLook) and camera of one step; the slides move between them. */
 export interface StepView {
@@ -71,7 +71,7 @@ export interface OaSettings {
   // drawn as larger balls (× size) with the AO of the medial balls (strength ao)
   balls: { spacing: number, size: number, ao: number }
   rays: { color: Vec3, contact: Vec3 } // sampling_ray_material, sampling_contact_material (emission)
-  seconds: { sweep: number, rays: number, diffusion: number, coverage: number, optimization: number, thinning: number, transition: number } // timeline lengths, step-to-step camera move
+  seconds: { sweep: number, rays: number, diffusion: number, coverage: number, build: number, reveal: number, optimization: number, thinning: number, transition: number } // timeline lengths, step-to-step camera move
 }
 
 // a region with several tetrahedra in the connectivity before the thinning (facing the camera)
@@ -93,6 +93,9 @@ export const OA_DEFAULTS: OaSettings = {
     sampling: figureView(1, { focus: [0.461, 0.53, 0.743], size: 0.035 }),
     // on the back: large and small spheres, the two sample sheets around them
     init: figureView(1, { focus: [0.461, 0.53, 0.743], size: 0.1 }),
+    // the initial mesh grows between the spheres, in one panel as tall as the view (the split panels
+    // of the optimization are narrower, hence their larger zoom); the inset of the optimization
+    initmesh: figureView(1.5, { focus: [0.461, 0.53, 0.743], size: 0.07 }),
     // on the back (sphere 6255): lit, facing the camera, the spheres move about twice the median
     optimization: figureView(1.5, { focus: [0.461, 0.53, 0.743], size: 0.07 }),
     connect: figureView(1.5, { focus: CONNECT_FOCUS, size: 0.12 }),
@@ -109,7 +112,7 @@ export const OA_DEFAULTS: OaSettings = {
   balls: { spacing: 0.014, size: 3, ao: 1 }, // smaller than the medial balls of the next step
   rays: { color: [0.08, 0.25, 0.35], contact: [1, 0.025, 0.005] },
   // the fast forward plays rays 1.5 s, diffusion 1 s, iterations 3.5 s: slower here, for the talk
-  seconds: { sweep: 8, rays: 4.5, diffusion: 3, coverage: 6, optimization: 8, thinning: 3, transition: 1.5 },
+  seconds: { sweep: 8, rays: 4.5, diffusion: 3, coverage: 6, build: 2.9, reveal: 2.2, optimization: 8, thinning: 3, transition: 1.5 },
 }
 
 function deepMerge<T>(base: T, over: unknown): T {
@@ -228,6 +231,14 @@ interface SceneSpec {
   mesh: number
   optimize?: boolean // spheres and mesh play the iterations
   split: boolean // spheres | mesh side by side
+  together?: boolean // spheres and mesh in the same panel
+  sphereScale?: number // displayed sphere radii × this at the end of the build (the medial radius is unchanged)
+  // the mesh appears with the spheres, as in the fast forward (the spheres stick out of it, the mesh
+  // links them), then the spheres fade out (buildPhases)
+  build?: boolean
+  // the view narrows to make room for the inset (the mesh moves to the middle), the marker appears,
+  // then the inset zooms out of it (revealPhases)
+  reveal?: boolean
   inset?: boolean // zoomed inset of the region of the step view
   bigInset?: boolean // the inset fills the height of the view (no split), next to the main view
   // the inset is a cross-section over the top right of the main view (which keeps its size): a
@@ -240,6 +251,10 @@ interface SceneSpec {
   iteration?: number // iteration shown (spheres, mesh)
   duration: keyof OaSettings['seconds'] | null // timeline length, null = still
 }
+
+// initial mesh: as the mesh appears, the spheres get a little smaller (as in the fast forward) so that
+// it shows between them
+const INITMESH_SPHERES = 0.85
 
 const S0: SceneSpec = { shell: 1, slice: 0, alphaLine: 0, samples: 0, spheres: 0, mesh: 0, split: false, duration: null }
 
@@ -265,6 +280,13 @@ export const SCENES: Record<PipelineStep, SceneSpec[]> = {
     { ...S0, shell: 0, samples: 1, inset: true, bigInset: true },
     { ...S0, shell: 0, samples: 1, spheres: 1, cover: true, inset: true, bigInset: true, duration: 'coverage' },
   ],
+  initmesh: [
+    // the initial spheres, the mesh of their connectivity grows between them, then the mesh alone
+    // with an inset of its slivers
+    { ...S0, shell: 0, spheres: 1, together: true, iteration: 0 },
+    { ...S0, shell: 0, spheres: 1, mesh: 1, together: true, sphereScale: INITMESH_SPHERES, build: true, iteration: 0, duration: 'build' },
+    { ...S0, shell: 0, mesh: 1, together: true, inset: true, bigInset: true, reveal: true, iteration: 0, duration: 'reveal' },
+  ],
   optimization: [
     // no shell: it would veil the spheres (the paper figure shows them alone)
     // both at iteration 0 first (the initial connectivity is poor: the "initial mesh" slide, and
@@ -282,6 +304,20 @@ export const SCENES: Record<PipelineStep, SceneSpec[]> = {
 export function sceneOf(step: PipelineStep, click: number): SceneSpec {
   const list = SCENES[step]
   return list[Math.max(0, Math.min(list.length - 1, click))]
+}
+
+const smooth = (a: number, b: number, x: number) => THREE.MathUtils.smoothstep(x, a, b)
+
+/** The initial mesh at progress p (the 2D view follows the same schedule): mesh opacity (in 2D the
+ * links grow), then the sphere fade. */
+export function buildPhases(p: number) {
+  // build: 2.9 s = the mesh appears 1.35 s, then the spheres fade out 1.55 s
+  return { grow: smooth(0, 0.466, p), fade: smooth(0.466, 1, p) }
+}
+
+/** Layout of the inset reveal at progress p: room made for the inset, marker, inset zooming out of it. */
+export function revealPhases(p: number) {
+  return { room: smooth(0, 0.45, p), marker: smooth(0.45, 0.6, p), zoom: smooth(0.6, 1, p) }
 }
 
 /** Timeline of the scene shown, for the slide UI (2D frames, pause button, iteration). */
@@ -361,6 +397,7 @@ class PipelineStage {
   rays: Ray[] = [] // the fast forward rays, then EXTRA_RAYS more (extraRays)
   contactsDone = false
   spheres: THREE.InstancedMesh | null = null
+  sphereDepth: THREE.InstancedMesh | null = null // depth of the front spheres while they fade (one layer blends)
   sphereUniforms: Record<string, THREE.IUniform> = {}
   sphereTexture: THREE.DataTexture | null = null // x, y, z, r (shown) per sphere, for the AO
   sphereRank = new Float32Array() // order of the greedy coverage (largest first), 0..1
@@ -370,6 +407,8 @@ class PipelineStage {
   wire: ThickWire | null = null
   edges: Uint16Array[] = []
   shownIteration = -1
+  sphereScale = 1 // displayed sphere radii × this (initmesh build), applied by setIteration
+  shownSphereScale = 1
   // connectivity before the thinning: faces kept (not on a tetrahedron), kept tetrahedron faces,
   // removed faces; edges before / after
   connectMeshes: THREE.Mesh[] = []
@@ -656,7 +695,18 @@ class PipelineStage {
     spheres.castShadow = true
     spheres.receiveShadow = true
     spheres.frustumCulled = false
+    spheres.renderOrder = 2
     ps.content.add(spheres)
+    // while the spheres fade, only the front one at each pixel blends over what is behind it (several
+    // overlapping translucent spheres would stay nearly opaque): their depth first, after the mesh
+    // and its wire (transparent pass, renderOrder 0 < 1 < 2), so that both show through
+    const depth = this.sphereDepth = new THREE.InstancedMesh(spheres.geometry, new THREE.MeshBasicMaterial({ colorWrite: false, transparent: true }), n)
+    depth.instanceMatrix = spheres.instanceMatrix
+    depth.layers.set(LAYER_SPHERES)
+    depth.frustumCulled = false
+    depth.renderOrder = 1
+    depth.visible = false
+    ps.content.add(depth)
 
     // reconstructed mesh: vertices = sphere centres; faces of keyframe k (A) fading into k + 1 (B)
     const posArray = new Float32Array(n * 3)
@@ -699,6 +749,11 @@ class PipelineStage {
       this.ps.content.add(m)
       return m
     })
+    // the removed faces, fading out, are drawn last and do not hide the faces behind them (else the
+    // background shows through where they are)
+    const removed = this.connectMeshes[2]
+    removed.renderOrder = 1
+    ;(removed.material as THREE.Material).depthWrite = false
     const before = new Uint16Array(groups.flat())
     const after = new Uint16Array([...groups[0], ...groups[1]])
     this.connectWires = [before, after].map((f) => {
@@ -1177,13 +1232,28 @@ class PipelineStage {
     // spheres and mesh
     if (s.optimize)
       clock.iteration = this.iterationAt(clock.progress)
+    // initmesh build: the mesh fades in among the spheres, then the spheres fade out (they stay out on
+    // the next scene, which has none)
+    const build = s.build ? buildPhases(clock.progress) : null
+    if (build) {
+      this.cur.spheres = 1 - build.fade
+      this.cur.mesh = build.grow
+    }
+    this.sphereScale = build ? THREE.MathUtils.lerp(1, s.sphereScale ?? 1, build.grow) : 1
     this.spheres!.visible = this.cur.spheres > 0.01
     ;(this.spheres!.material as THREE.MeshStandardMaterial).opacity = this.cur.spheres
-    ;(this.spheres!.material as THREE.MeshStandardMaterial).transparent = this.cur.spheres < 1
-    this.meshA!.visible = this.meshB!.visible = this.wire!.line.visible = this.cur.mesh > 0.01
+    setTransparent(this.spheres!.material as THREE.Material, this.cur.spheres < 1)
+    this.sphereDepth!.visible = this.spheres!.visible && this.cur.spheres < 1
+    const meshOn = this.cur.mesh > 0.01
+    const faces = this.meshA!.material as THREE.MeshStandardMaterial
+    faces.opacity = build ? build.grow : 1
+    setTransparent(faces, faces.opacity < 1)
+    this.meshA!.visible = this.meshB!.visible = meshOn
+    this.wire!.line.visible = meshOn
+    this.wire!.material.opacity = this.settings.mesh.wireOpacity * faces.opacity
     if (s.cover)
       this.setCoverage(clock.progress)
-    else if (clock.iteration !== this.shownIteration)
+    else if (clock.iteration !== this.shownIteration || this.sphereScale !== this.shownSphereScale)
       this.setIteration(clock.iteration)
 
     // connectivity, then the thinning: removed faces fade out, kept tetrahedron faces turn green
@@ -1198,14 +1268,19 @@ class PipelineStage {
     ;(removed.material as THREE.MeshStandardMaterial).color.copy(TET_ORANGE)
     rest.visible = tets.visible = on
     removed.visible = on && thin < 0.99
-    for (const m of [rest, tets])
-      (m.material as THREE.MeshStandardMaterial).opacity = this.cur.connect
+    for (const m of [rest, tets]) {
+      const mat = m.material as THREE.MeshStandardMaterial
+      mat.opacity = this.cur.connect
+      setTransparent(mat, mat.opacity < 1) // opaque once shown: drawn before the removed faces
+    }
     ;(removed.material as THREE.MeshStandardMaterial).opacity = this.cur.connect * (1 - thin)
+    // the kept edges stay as they are; only the edges of the removed faces fade out (a cross-fade of
+    // the two wires would lighten the kept ones half-way)
     const wireOpacity = this.settings.mesh.wireOpacity * this.cur.connect
     before.line.visible = on && thin < 0.99
     after.line.visible = on && thin > 0.01
     before.material.opacity = wireOpacity * (1 - thin)
-    after.material.opacity = wireOpacity * thin
+    after.material.opacity = wireOpacity
   }
 
   /** Keyframe index space played at constant speed: the early iterations (most motion) last longer. */
@@ -1227,7 +1302,8 @@ class PipelineStage {
     const n = d.manifest.spheres.count
     const a = k * n * 4
     const b = (k + 1) * n * 4
-    const scale = this.settings.spheres.radiusScale
+    this.shownSphereScale = this.sphereScale
+    const scale = this.settings.spheres.radiusScale * this.shownSphereScale
     const m = new THREE.Matrix4()
     const p = this.meshPos!.array as Float32Array
     const t = this.sphereTexture!.image.data as Float32Array
@@ -1436,7 +1512,9 @@ class PipelineStage {
     const big = inset && !split && this.spec.bigInset
     const slab = inset && !!this.spec.slab
     const side = slab ? Math.floor(Math.min(h * 0.38, w * 0.26)) : big ? Math.floor(Math.min(h, w * 0.5)) : inset ? Math.floor(Math.min(h / 2 - 4, w * 0.22)) : 0
-    const mainW = inset && !slab ? w - side - 12 : w
+    // the inset reveal: the view makes room, then the marker, then the inset zooms out of it
+    const reveal = this.spec.reveal ? revealPhases(pipelineClock.progress) : { room: 1, marker: 1, zoom: 1 }
+    const mainW = inset && !slab ? Math.round(w - (side + 12) * reveal.room) : w
     const regionWorld = (region?.size ?? 0) * content.scale.x
     if (region) {
       content.localToWorld(this.focus.set(...region.focus))
@@ -1461,8 +1539,9 @@ class PipelineStage {
         w?.material.resolution.set(vw, vh)
       renderer.render(scene, cam)
     }
-    const place = (f: HTMLDivElement, x: number, y: number, fw: number, fh: number) => {
-      f.style.display = 'block'
+    const place = (f: HTMLDivElement, x: number, y: number, fw: number, fh: number, opacity = 1) => {
+      f.style.display = opacity > 0.01 ? 'block' : 'none'
+      f.style.opacity = `${opacity}`
       f.style.transform = `translate(${x}px, ${y}px)`
       f.style.width = `${fw}px`
       f.style.height = `${fh}px`
@@ -1480,18 +1559,26 @@ class PipelineStage {
       this.panels.push({ x, w: vw, layers })
       if (!inset)
         return
-      if (slab)
-        this.drawSlab(() => draw(w - side, h - side, side, side, this.insetCamera))
-      else
-        draw(w - side, row ? 0 : h - side, side, side, this.insetCamera)
       const p = this.focus.clone().project(camera)
       const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion)
       const q = this.focus.clone().addScaledVector(right, regionWorld).project(camera)
       const crop = Math.max(2, Math.abs(q.x - p.x) / 2 * vw)
       const cx = (p.x + 1) / 2 * vw - crop / 2
       const cy = (1 - p.y) / 2 * h - crop / 2
-      place(this.frames[2 * row], x + cx, cy, crop, crop)
-      place(this.frames[2 * row + 1], w - side, row ? h - side : 0, side, side)
+      // the inset square (CSS pixels, from the top), from the marker to its place as it zooms out
+      const top = row ? h - side : big ? Math.round((h - side) / 2) : 0
+      const e = reveal.zoom
+      const ix = THREE.MathUtils.lerp(x + cx, w - side, e)
+      const iy = THREE.MathUtils.lerp(cy, top, e)
+      const is = THREE.MathUtils.lerp(crop, side, e)
+      if (e > 0.001) {
+        if (slab)
+          this.drawSlab(() => draw(w - side, h - side, side, side, this.insetCamera))
+        else
+          draw(ix, h - iy - is, is, is, this.insetCamera)
+      }
+      place(this.frames[2 * row], x + cx, cy, crop, crop, reveal.marker)
+      place(this.frames[2 * row + 1], ix, iy, is, is, e > 0.001 ? 1 : 0)
     }
     for (const f of this.frames)
       f.style.display = 'none'
@@ -1505,6 +1592,9 @@ class PipelineStage {
     if (split) {
       panel(0, mainW / 2, [0, LAYER_SPHERES], 0)
       panel(mainW / 2, mainW / 2, [LAYER_MESH], 1)
+    }
+    else if (this.spec.together) {
+      panel(0, mainW, [0, LAYER_SPHERES, LAYER_MESH], 0)
     }
     else {
       panel(0, mainW, [0, LAYER_SPHERES], 0)
@@ -1707,6 +1797,15 @@ class ThickWire {
     }
     this.ends.needsUpdate = true
     this.line.geometry.instanceCount = idx.length / 2
+  }
+}
+
+/** Switches a material between the opaque and the transparent passes. Its program must follow: one
+ * compiled while opaque ignores the opacity (three.js forces alpha to 1), so a fade would not show. */
+function setTransparent(material: THREE.Material, transparent: boolean) {
+  if (material.transparent !== transparent) {
+    material.transparent = transparent
+    material.needsUpdate = true
   }
 }
 

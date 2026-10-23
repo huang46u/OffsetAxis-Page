@@ -243,6 +243,43 @@
           "size": 0.1
         }
       },
+      "initmesh": {
+        "object": {
+          "location": [
+            -0.13,
+            -0.25,
+            -0.03
+          ],
+          "rotation": [
+            95,
+            0,
+            112
+          ],
+          "scale": 0.45
+        },
+        "camera": {
+          "location": [
+            0.9927,
+            -0.3747,
+            0.4552
+          ],
+          "lookAt": [
+            0.0442,
+            0.0865,
+            0.1314
+          ],
+          "focalLength": 45
+        },
+        "zoom": 1.5,
+        "inset": {
+          "focus": [
+            0.461,
+            0.53,
+            0.743
+          ],
+          "size": 0.07
+        }
+      },
       "optimization": {
         "object": {
           "location": [
@@ -390,6 +427,8 @@
       "rays": 4.5,
       "diffusion": 3,
       "coverage": 6,
+      "build": 2.9,
+      "reveal": 2.2,
       "optimization": 8,
       "thinning": 3,
       "transition": 1.5

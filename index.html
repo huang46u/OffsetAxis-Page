@@ -111,11 +111,13 @@
           </article>
           <article data-step="3" hidden>
             <h3><i>4</i>Initial medial spheres</h3>
-            <div class="pair">
+            <div class="pair init-only">
               <img src="/img/method/medial_spheres_init_top.webp" alt="One candidate medial sphere per offset-surface sample">
               <img src="/img/method/medial_spheres_init_bottom.webp" alt="The largest sphere covers the samples in its dilated support">
             </div>
-            <p>Each sample gets its maximal ball inside the offset volume <span class="cite">[Ma et al. 2012]</span>. A greedy cover keeps the largest sphere, drops the samples it covers and repeats <span class="cite">[Dou et al. 2022]</span>.</p>
+            <p class="init-only">Each sample gets its maximal ball inside the offset volume <span class="cite">[Ma et al. 2012]</span>. A greedy cover keeps the largest sphere, drops the samples it covers and repeats <span class="cite">[Dou et al. 2022]</span>.</p>
+            <canvas class="frames mesh-only" data-frames="initmesh2d" width="512" height="512" role="img" aria-label="2D illustration: neighbouring initial circles are linked into a mesh"></canvas>
+            <p class="mesh-only"><span class="k3">Mesh of the <b>initial spheres</b>, connected as in <b>VMAS</b> <span class="cite">[Huang et al. 2024]</span> (dual of the clusters).</span> <span class="k4"><b>Poor quality</b>, many slivers: the spheres need to be optimized.</span></p>
           </article>
           <article data-step="4" hidden>
             <h3><i>5</i>Variational optimization</h3>
